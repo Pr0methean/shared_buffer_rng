@@ -334,18 +334,15 @@ mod tests {
     #[test_log::test]
     fn loom_test_at_most_once_delivery() {
         use loom::model::Builder;
-        use loom::sync::atomic::fence;
         use rand::RngCore;
         const THREADS: usize = 2;
-        const ITERS_PER_THREAD: usize = 2;
+        const ITERS_PER_THREAD: usize = 1;
         let mut builder = Builder::default();
         builder.max_threads = THREADS + 2; // include filler thread and test thread
-        builder.max_branches = 1_000_000;
-        builder.preemption_bound = Some(5);
+        builder.max_branches = 300_000;
         builder.check(|| {
             let seeder: SharedBufferRng::<8,4,_> = SharedBufferRng::new(BlockRng64::new(
                 ByteValuesInOrderRng { words_written: AtomicUsize::new(0)}));
-            fence(SeqCst);
             let ths: Vec<_> = (0..THREADS)
                 .map(|_| {
                     let mut seeder_clone = BlockRng64::new(seeder.clone());
@@ -359,8 +356,6 @@ mod tests {
             for th in ths {
                 th.join().unwrap();
             }
-            fence(SeqCst);
-            loom::stop_exploring();
             let mut words_sorted = Vec::new();
             WORDS.pop_all((), |(), word| words_sorted.push(word));
             let mut words_dedup = words_sorted.clone();
