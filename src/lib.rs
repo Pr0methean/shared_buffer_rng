@@ -1,14 +1,12 @@
-#![feature(sync_unsafe_cell)]
-#![feature(lazy_cell)]
-
 use core::hint::spin_loop;
 use std::iter::repeat_with;
 #[cfg(not(loom))]
 use std::{sync::{Arc, Weak, Mutex, atomic::{AtomicUsize, Ordering}}, thread::{spawn, yield_now}, cell::UnsafeCell};
 use std::fmt::Debug;
 use std::slice;
+use std::sync::atomic::Ordering::SeqCst;
 #[cfg(loom)]
-use loom::{sync::{Arc, Mutex, atomic::{AtomicUsize, Ordering}}, thread::{spawn, yield_now}, cell::UnsafeCell};
+use loom::{sync::{Arc, Mutex, atomic::{AtomicBool, AtomicUsize, Ordering}}, thread::{spawn, yield_now}, cell::UnsafeCell};
 use log::info;
 use rand::Rng;
 use rand::rngs::OsRng;
@@ -59,6 +57,8 @@ struct SharedBufferRngInner<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: u
     buffer: [Mutex<[u64; WORDS_PER_SEED]>; SEEDS_CAPACITY],
     // SAFETY: only accessed by one thread
     inner: SyncUnsafeCell<T>,
+    #[cfg(loom)]
+    closed: AtomicBool
 }
 
 unsafe impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, T: Rng + Send> Sync
@@ -201,7 +201,18 @@ SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, T> {
     #[inline]
     fn upgrade(arc: &Arc<SyncUnsafeCell<SharedBufferRngInner<WORDS_PER_SEED, SEEDS_CAPACITY, T>>>)
                -> Option<&Arc<SyncUnsafeCell<SharedBufferRngInner<WORDS_PER_SEED, SEEDS_CAPACITY, T>>>> {
-        Some(arc)
+        if unsafe { arc.0.with(|inner| (*inner).closed.load(SeqCst)) } {
+            None
+        } else {
+            Some(arc)
+        }
+    }
+
+    #[cfg(all(loom,test))]
+    fn close(&self) {
+        unsafe {
+            self.0.with_mut(|inner| (*inner).closed.fetch_or(true, SeqCst));
+        }
     }
 
     #[cfg(not(loom))]
@@ -224,7 +235,9 @@ SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, T> {
             started_writing: 0.into(),
             finished_writing: 0.into(),
             buffer: repeat_with(|| Mutex::new([0; WORDS_PER_SEED])).take(SEEDS_CAPACITY).collect::<Vec<_>>().try_into().ok().unwrap(),
-            inner: inner.into()
+            inner: inner.into(),
+            #[cfg(loom)]
+            closed: false.into()
         }));
         let inner_weak = Self::downgrade(&inner);
         spawn(move || {
@@ -314,8 +327,9 @@ mod tests {
     }
 
     #[cfg(loom)]
-    const WORDS: std::sync::LazyLock<scc::Bag<u64>> = std::sync::LazyLock::new(scc::Bag::new);
-
+    loom::lazy_static! {
+        static ref WORDS: scc::Bag<u64> = scc::Bag::new();
+    }
     #[cfg(loom)]
     #[test_log::test]
     fn loom_test_at_most_once_delivery() {
@@ -327,12 +341,12 @@ mod tests {
         let mut builder = Builder::default();
         builder.max_threads = THREADS + 1; // include filler thread
         builder.check(|| {
-            let shared_seeder = SharedBufferRng::<8,4,_>::new(BlockRng64::new(
+            let seeder: SharedBufferRng::<8,4,_> = SharedBufferRng::new(BlockRng64::new(
                 ByteValuesInOrderRng { words_written: AtomicUsize::new(0)}));
             fence(SeqCst);
             let ths: Vec<_> = (0..THREADS)
                 .map(|_| {
-                    let mut seeder_clone = BlockRng64::new(shared_seeder.clone());
+                    let mut seeder_clone = BlockRng64::new(seeder.clone());
                     loom::thread::spawn(move || {
                         for _ in 0..ITERS_PER_THREAD {
                             WORDS.push(seeder_clone.next_u64());
@@ -349,6 +363,7 @@ mod tests {
             let mut words_dedup = words_sorted.clone();
             words_dedup.dedup();
             assert_eq!(words_dedup.len(), words_sorted.len());
+            seeder.close();
         });
     }
 }

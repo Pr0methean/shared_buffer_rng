@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [target.'cfg(loom)'.dependencies]
-loom = "0.7.1"
+loom = { version = "0.7.1", features = ["checkpoint"] }
 
 [dependencies]
 rand = "0.8.5"
