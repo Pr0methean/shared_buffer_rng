@@ -11,6 +11,7 @@ use std::thread;
 
 const U8_VALUES: usize = u8::MAX as usize + 1;
 
+#[derive(Debug)]
 struct ByteValuesInOrderRng {
     words_written: AtomicUsize
 }

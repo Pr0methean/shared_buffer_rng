@@ -5,12 +5,14 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[target.'cfg(loom)'.dependencies]
+loom = "0.7.1"
+
 [dependencies]
 rand = "0.8.5"
 rand_core = "0.6.4"
-scc = "2.0.8"
 log = "0.4.20"
+scc = "2.0.8"
 
 [dev-dependencies]
-loom = "0.7.1"
 test-log = "0.2.14"

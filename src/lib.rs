@@ -1,24 +1,57 @@
 #![feature(sync_unsafe_cell)]
-#![feature(iter_array_chunks)]
 #![feature(lazy_cell)]
-#![feature(iterator_try_collect)]
 
 use core::hint::spin_loop;
-use core::cell::SyncUnsafeCell;
 use std::iter::repeat_with;
-use std::pin::pin;
-use std::sync::{Arc}; // FIXME: Change to loom::sync::Arc once https://github.com/tokio-rs/loom/issues/156 is fixed
 #[cfg(not(loom))]
-use std::{sync::{Mutex, atomic::{AtomicUsize, Ordering}}, thread::{spawn, yield_now}};
+use std::{sync::{Arc, Weak, Mutex, atomic::{AtomicUsize, Ordering}}, thread::{spawn, yield_now}, cell::UnsafeCell};
+use std::fmt::Debug;
 use std::slice;
 #[cfg(loom)]
-use loom::{sync::{Mutex, atomic::{AtomicUsize, Ordering}}, thread::{spawn, yield_now}};
+use loom::{sync::{Arc, Mutex, atomic::{AtomicUsize, Ordering}}, thread::{spawn, yield_now}, cell::UnsafeCell};
 use log::info;
 use rand::Rng;
 use rand::rngs::OsRng;
-use rand_core::{CryptoRng, Error, RngCore};
+use rand_core::{CryptoRng};
 use rand_core::block::{BlockRng64, BlockRngCore};
 
+#[derive(Debug)]
+pub(crate) struct SyncUnsafeCell<T>(UnsafeCell<T>);
+
+// Reimplemented so that we can use same API in loom
+impl<T> SyncUnsafeCell<T> {
+    #[allow(unused)]
+    #[cfg(not(loom))]
+    pub(crate) unsafe fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R {
+        f(self.0.get().as_ref().unwrap())
+    }
+
+    #[allow(unused)]
+    #[cfg(loom)]
+    pub(crate) unsafe fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R {
+        f(self.0.get().deref())
+    }
+
+    #[cfg(not(loom))]
+    pub(crate) unsafe fn with_mut<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
+        f(self.0.get().as_mut().unwrap())
+    }
+
+    #[cfg(loom)]
+    pub(crate) unsafe fn with_mut<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
+        f(self.0.get_mut().deref())
+    }
+}
+
+impl <T> From<T> for SyncUnsafeCell<T> {
+    fn from(value: T) -> Self {
+        SyncUnsafeCell(UnsafeCell::new(value))
+    }
+}
+
+unsafe impl <T> Sync for SyncUnsafeCell<T> {}
+
+#[derive(Debug)]
 struct SharedBufferRngInner<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, T: Rng> {
     started_reading: AtomicUsize,
     started_writing: AtomicUsize,
@@ -74,26 +107,25 @@ SharedBufferRngInner<WORDS_PER_SEED, SEEDS_CAPACITY, T> {
         if write_end_index == 0 {
             write_end_index = SEEDS_CAPACITY;
         }
-        let inner = unsafe { self.inner.get().as_mut() }.unwrap();
-        // SAFETY: above bounds checks prevent reading bytes while they're still being written
-        if write_end_index > write_start_index {
-            self.fill_range(write_start_index, write_end_index, inner);
-        } else {
-            self.fill_range(write_start_index, SEEDS_CAPACITY, inner);
-            self.fill_range(0, write_end_index, inner);
-        }
-        let cmpex = self.finished_writing.compare_exchange(write_start, write_end, Ordering::SeqCst, Ordering::SeqCst);
-        if !cmpex.is_ok() {
-            panic!("compare_exchange result: {:?}", cmpex)
+        unsafe {
+            self.inner.with_mut(|inner|
+                // SAFETY: above bounds checks prevent reading bytes while they're still being written
+                if write_end_index > write_start_index {
+                    self.fill_range(write_start_index, write_end_index, inner);
+                } else {
+                    self.fill_range(write_start_index, SEEDS_CAPACITY, inner);
+                    self.fill_range(0, write_end_index, inner);
+                });
         }
         true
     }
 
     fn fill_range(&self, write_start_index: usize, write_end_index: usize, inner: &mut T) {
-        self.buffer[write_start_index..write_end_index].iter().for_each(
-            |seed| seed.lock().unwrap().iter_mut().for_each(|word| *word
-                = inner.next_u64())
-        );
+        self.buffer[write_start_index..write_end_index].iter().for_each(|seed| {
+            seed.lock().unwrap().iter_mut().for_each(|word| *word
+                = inner.next_u64());
+            self.finished_writing.fetch_add(1, Ordering::SeqCst);
+        });
     }
 
     fn read_range(&self, write_start_index: usize, write_end_index: usize, out: &mut [[u64; WORDS_PER_SEED]]) {
@@ -151,30 +183,61 @@ pub type SharedBufferRngStd = SharedBufferRng<8, 16, OsRng>;
 
 impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, T: Rng + Send + 'static>
 SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, T> {
+    #[cfg(loom)]
+    #[inline]
+    fn downgrade(arc: &Arc<SyncUnsafeCell<SharedBufferRngInner<WORDS_PER_SEED, SEEDS_CAPACITY, T>>>)
+                 -> Arc<SyncUnsafeCell<SharedBufferRngInner<WORDS_PER_SEED, SEEDS_CAPACITY, T>>> {
+        arc.clone()
+    }
 
+    #[cfg(not(loom))]
+    #[inline]
+    fn downgrade(arc: &Arc<SyncUnsafeCell<SharedBufferRngInner<WORDS_PER_SEED, SEEDS_CAPACITY, T>>>)
+                 -> Weak<SyncUnsafeCell<SharedBufferRngInner<WORDS_PER_SEED, SEEDS_CAPACITY, T>>> {
+        Arc::downgrade(arc)
+    }
+
+    #[cfg(loom)]
+    #[inline]
+    fn upgrade(arc: &Arc<SyncUnsafeCell<SharedBufferRngInner<WORDS_PER_SEED, SEEDS_CAPACITY, T>>>)
+               -> Option<&Arc<SyncUnsafeCell<SharedBufferRngInner<WORDS_PER_SEED, SEEDS_CAPACITY, T>>>> {
+        Some(arc)
+    }
+
+    #[cfg(not(loom))]
+    #[inline]
+    fn upgrade(weak: &Weak<SyncUnsafeCell<SharedBufferRngInner<WORDS_PER_SEED, SEEDS_CAPACITY, T>>>)
+               -> Option<Arc<SyncUnsafeCell<SharedBufferRngInner<WORDS_PER_SEED, SEEDS_CAPACITY, T>>>> {
+        weak.upgrade()
+    }
+}
+
+impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, T: Rng + Send + Debug + 'static>
+SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, T> {
     pub fn new_master_rng(inner: T) -> BlockRng64<Self> {
         BlockRng64::new(Self::new(inner))
     }
 
     pub fn new(inner: T) -> Self {
-        let inner = Arc::new(SyncUnsafeCell::new(SharedBufferRngInner {
+        let inner = Arc::new(SyncUnsafeCell::from(SharedBufferRngInner {
             started_reading: 0.into(),
             started_writing: 0.into(),
             finished_writing: 0.into(),
             buffer: repeat_with(|| Mutex::new([0; WORDS_PER_SEED])).take(SEEDS_CAPACITY).collect::<Vec<_>>().try_into().ok().unwrap(),
             inner: inner.into()
         }));
-        let inner_weak = Arc::downgrade(&inner);
+        let inner_weak = Self::downgrade(&inner);
         spawn(move || {
             info!("Starting the writer thread for {:?}", inner_weak);
             loop {
-                match inner_weak.upgrade() {
+                match Self::upgrade(&inner_weak) {
                     // SAFETY: This thread is the only one that mutates inner
                     Some(inner) => unsafe {
-                        let pinned = pin!(inner.as_ref()).get();
-                        if !pinned.as_ref().unwrap().fill() {
-                            spin_loop();
-                        }
+                        inner.with_mut(|inner| {
+                            if !inner.fill() {
+                                spin_loop();
+                            }
+                        })
                     },
                     None => {
                         info!("Writer thread exiting");
@@ -194,12 +257,14 @@ for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, T> {
 
     fn generate(&mut self, results: &mut Self::Results) {
         let results: &mut [[u64; WORDS_PER_SEED]] = slice::from_mut(&mut results.0).into();
-        let inner = unsafe { self.0.get().as_ref().unwrap() };
-        loop {
-            match inner.poll(results) {
-                0 => yield_now(),
-                _ => return
-            }
+        unsafe {
+            self.0.with_mut(|inner|
+                loop {
+                    match inner.poll(results) {
+                        0 => yield_now(),
+                        _ => return
+                    }
+                });
         }
     }
 }
@@ -208,18 +273,18 @@ impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, T: Rng + Send> C
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::Ordering::SeqCst;
-    use std::sync::{LazyLock};
-    use loom::model::Builder;
-    use loom::sync::atomic::{AtomicUsize, fence};
-    use rand::rngs::StdRng;
+    #[cfg(not(loom))]
+    use core::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    #[cfg(loom)]
+    use loom::sync::atomic::{AtomicUsize, Ordering::SeqCst};
     use rand_core::block::{BlockRng64, BlockRngCore};
-    use rand_core::SeedableRng;
-    use scc::{Bag};
+    #[cfg(not(loom))]
+    use rand_core::{Error};
     use super::*;
 
     const U8_VALUES: usize = u8::MAX as usize + 1;
 
+    #[derive(Debug)]
     struct ByteValuesInOrderRng {
         words_written: AtomicUsize
     }
@@ -236,8 +301,11 @@ mod tests {
         }
     }
 
+    #[cfg(not(loom))]
     #[test]
     fn basic_test() -> Result<(), Error>{
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
         let shared_seeder = SharedBufferRngStd::new(OsRng::default());
         let client_prng: StdRng = StdRng::from_rng(&mut BlockRng64::new(shared_seeder))?;
         let zero_seed_prng = StdRng::from_seed([0; 32]);
@@ -245,10 +313,15 @@ mod tests {
         Ok(())
     }
 
-    const WORDS: LazyLock<Bag<u64>> = LazyLock::new(Bag::new);
+    #[cfg(loom)]
+    const WORDS: std::sync::LazyLock<scc::Bag<u64>> = std::sync::LazyLock::new(scc::Bag::new);
 
+    #[cfg(loom)]
     #[test_log::test]
     fn loom_test_at_most_once_delivery() {
+        use loom::model::Builder;
+        use loom::sync::atomic::fence;
+        use rand::RngCore;
         const THREADS: usize = 2;
         const ITERS_PER_THREAD: usize = 2;
         let mut builder = Builder::default();
