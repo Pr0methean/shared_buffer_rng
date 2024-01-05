@@ -1,4 +1,3 @@
-use core::hint::spin_loop;
 use std::iter::repeat_with;
 #[cfg(not(loom))]
 use std::{sync::{Arc, Weak, Mutex, atomic::{AtomicUsize, Ordering}}, thread::{spawn, yield_now}, cell::UnsafeCell};
@@ -107,9 +106,9 @@ SharedBufferRngInner<WORDS_PER_SEED, SEEDS_CAPACITY, T> {
         if write_end_index == 0 {
             write_end_index = SEEDS_CAPACITY;
         }
+        // SAFETY: above bounds checks prevent reading bytes while they're still being written
         unsafe {
             self.inner.with_mut(|inner|
-                // SAFETY: above bounds checks prevent reading bytes while they're still being written
                 if write_end_index > write_start_index {
                     self.fill_range(write_start_index, write_end_index, inner);
                 } else {
@@ -211,7 +210,7 @@ SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, T> {
     #[cfg(all(loom,test))]
     fn close(&self) {
         unsafe {
-            self.0.with_mut(|inner| (*inner).closed.fetch_or(true, SeqCst));
+            self.0.with(|inner| (*inner).closed.fetch_or(true, SeqCst));
         }
     }
 
@@ -246,9 +245,9 @@ SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, T> {
                 match Self::upgrade(&inner_weak) {
                     // SAFETY: This thread is the only one that mutates inner
                     Some(inner) => unsafe {
-                        inner.with_mut(|inner| {
+                        inner.with(|inner| {
                             if !inner.fill() {
-                                spin_loop();
+                                yield_now();
                             }
                         })
                     },
@@ -271,13 +270,14 @@ for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, T> {
     fn generate(&mut self, results: &mut Self::Results) {
         let results: &mut [[u64; WORDS_PER_SEED]] = slice::from_mut(&mut results.0).into();
         unsafe {
-            self.0.with_mut(|inner|
-                loop {
+            loop {
+                self.0.with(|inner|
                     match inner.poll(results) {
                         0 => yield_now(),
                         _ => return
                     }
-                });
+                );
+            }
         }
     }
 }
@@ -339,7 +339,9 @@ mod tests {
         const THREADS: usize = 2;
         const ITERS_PER_THREAD: usize = 2;
         let mut builder = Builder::default();
-        builder.max_threads = THREADS + 1; // include filler thread
+        builder.max_threads = THREADS + 2; // include filler thread and test thread
+        builder.max_branches = 1_000_000;
+        builder.preemption_bound = Some(5);
         builder.check(|| {
             let seeder: SharedBufferRng::<8,4,_> = SharedBufferRng::new(BlockRng64::new(
                 ByteValuesInOrderRng { words_written: AtomicUsize::new(0)}));
@@ -358,6 +360,7 @@ mod tests {
                 th.join().unwrap();
             }
             fence(SeqCst);
+            loom::stop_exploring();
             let mut words_sorted = Vec::new();
             WORDS.pop_all((), |(), word| words_sorted.push(word));
             let mut words_dedup = words_sorted.clone();
