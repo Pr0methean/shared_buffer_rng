@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering::SeqCst;
 use std::sync::LazyLock;
 use core::sync::atomic::{AtomicUsize, fence};
 use rand_core::RngCore;
-use rand_core::block::{BlockRng, BlockRngCore};
+use rand_core::block::{BlockRng, BlockRng64, BlockRngCore};
 use scc::Bag;
 use shared_buffer_rng::SharedBufferRng;
 use std::thread;
@@ -47,19 +47,19 @@ impl BlockRngCore for ByteValuesInOrderRng {
     }
 }
 
-const WORDS: LazyLock<Bag<u32>> = LazyLock::new(Bag::new);
+const WORDS: LazyLock<Bag<u64>> = LazyLock::new(Bag::new);
 fn main() {
     const THREADS: usize = 4;
     const ITERS_PER_THREAD: usize = 256;
-    let shared_seeder = SharedBufferRng::<128,_>::new(BlockRng::new(
+    let shared_seeder = SharedBufferRng::<1,128,_>::new(BlockRng::new(
         ByteValuesInOrderRng { words_written: AtomicUsize::new(0)}));
     fence(SeqCst);
     let ths: Vec<_> = (0..THREADS)
         .map(|_| {
-            let mut seeder_clone = shared_seeder.clone();
+            let mut seeder = BlockRng64::new(shared_seeder.clone());
             thread::spawn(move || {
                 for _ in 0..ITERS_PER_THREAD {
-                    let next_word = seeder_clone.next_u32();
+                    let next_word = seeder.next_u64();
                     WORDS.push(next_word);
                 }
             })
