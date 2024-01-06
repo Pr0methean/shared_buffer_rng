@@ -1,6 +1,8 @@
+#![feature(lazy_cell)]
+
 use std::sync::atomic::Ordering::SeqCst;
 use core::sync::atomic::{AtomicUsize};
-use std::sync::OnceLock;
+use std::sync::{LazyLock};
 use rand_core::RngCore;
 use rand_core::block::{BlockRng64, BlockRngCore};
 use scc::Bag;
@@ -46,9 +48,8 @@ impl BlockRngCore for ByteValuesInOrderRng {
     }
 }
 
-const WORDS: OnceLock<Bag<u64>> = OnceLock::new();
+const WORDS: LazyLock<Bag<u64>> = LazyLock::new(Bag::new);
 fn main() {
-    WORDS.get_or_init(Bag::new);
     const THREADS: usize = 2;
     const ITERS_PER_THREAD: usize = 1;
     let seeder: SharedBufferRng::<8,4> = SharedBufferRng::new(BlockRng64::new(
@@ -58,7 +59,7 @@ fn main() {
             let mut seeder_clone = BlockRng64::new(seeder.clone());
             spawn(move || {
                 for _ in 0..ITERS_PER_THREAD {
-                    WORDS.get().unwrap().push(seeder_clone.next_u64());
+                    WORDS.push(seeder_clone.next_u64());
                 }
             })
         })
@@ -67,7 +68,7 @@ fn main() {
         th.join().unwrap();
     }
     let mut words_sorted = Vec::new();
-    WORDS.get().unwrap().pop_all((), |(), word| words_sorted.push(word));
+    WORDS.pop_all((), |(), word| words_sorted.push(word));
     let mut words_dedup = words_sorted.clone();
     words_dedup.dedup();
     assert_eq!(words_dedup.len(), words_sorted.len());
