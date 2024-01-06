@@ -1,11 +1,11 @@
-use std::{sync::{Arc, atomic::{AtomicUsize}}, thread::{spawn, yield_now}};
+use std::{sync::Arc, thread::{spawn, yield_now}};
 use std::fmt::Debug;
 use std::slice;
 use async_channel::{Receiver, Sender};
 use log::{info};
 use rand::Rng;
 use rand::rngs::OsRng;
-use rand_core::{CryptoRng, RngCore};
+use rand_core::{CryptoRng};
 use rand_core::block::{BlockRng64, BlockRngCore};
 
 pub struct DefaultableArray<const N: usize, T>([T; N]);
@@ -31,7 +31,7 @@ impl <const N: usize, T> AsRef<[T]> for DefaultableArray<N, T> {
 #[derive(Clone, Debug)]
 pub struct SharedBufferRng<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize> {
     // Needed to keep the weak sender reachable as long as the receiver is strongly reachable
-    sender: Arc<Sender<[u64; WORDS_PER_SEED]>>,
+    _sender: Arc<Sender<[u64; WORDS_PER_SEED]>>,
     receiver: Receiver<[u64; WORDS_PER_SEED]>
 }
 
@@ -53,7 +53,7 @@ SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY> {
             loop {
                 match weak_sender.upgrade() {
                     None => return,
-                    Some(sender) => unsafe {
+                    Some(sender) => {
                         seed_from_source.iter_mut().for_each(
                                 |word| *word = inner_inner.next_u64());
                         while !sender.send_blocking(seed_from_source).is_ok() {
@@ -66,12 +66,12 @@ SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY> {
                 }
             }
         });
-        while (receiver.is_empty()) {
+        while receiver.is_empty() {
             yield_now();
         }
         SharedBufferRng {
             receiver: inner,
-            sender: sender.into()
+            _sender: sender.into()
         }
     }
 }
