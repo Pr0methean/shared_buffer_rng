@@ -65,6 +65,7 @@ SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY> {
                             if result.is_ok() {
                                 continue 'outer;
                             } else {
+                                sender.close();
                                 if weak_sender.upgrade().is_none() {
                                     info!("Detected (with seed already fetched) that a seed channel is no longer open \
                                     for receiving");
