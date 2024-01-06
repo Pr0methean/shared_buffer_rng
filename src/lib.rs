@@ -112,6 +112,7 @@ impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize> CryptoRng for Sh
 mod tests {
     use core::sync::atomic::{AtomicUsize, Ordering::SeqCst};
     use std::sync::{OnceLock};
+    use std::thread::spawn;
     use rand_core::block::{BlockRng64, BlockRngCore};
     use rand_core::{Error};
     use scc::Bag;
