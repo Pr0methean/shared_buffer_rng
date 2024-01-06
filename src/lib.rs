@@ -39,8 +39,8 @@ pub type SharedBufferRngStd = SharedBufferRng<8, 16>;
 
 impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize>
 SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY> {
-    pub fn new_master_rng<T: Rng + Send + Debug + 'static>(inner: T) -> BlockRng64<Self> {
-        BlockRng64::new(Self::new(inner))
+    pub fn new_master_rng<T: Rng + Send + Debug + 'static>() -> BlockRng64<Self> {
+        BlockRng64::new(Self::new(OsRng::default()))
     }
 
     pub fn new<T: Rng + Send + Debug + 'static>(mut inner_inner: T) -> Self {
@@ -61,7 +61,9 @@ SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY> {
                             if result.is_ok() {
                                 continue 'outer;
                             } else {
-                                if !weak_sender.upgrade().is_none() {
+                                if weak_sender.upgrade().is_none() {
+                                    info!("Detected that a seed channel is no longer open for receiving");
+                                } else {
                                     error!("Error writing to shared buffer: {:?}", result);
                                 }
                                 return;

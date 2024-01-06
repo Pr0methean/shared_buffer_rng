@@ -49,7 +49,6 @@ impl BlockRngCore for ByteValuesInOrderRng {
 const WORDS: OnceLock<Bag<u64>> = OnceLock::new();
 fn main() {
     WORDS.get_or_init(Bag::new);
-    use rand::RngCore;
     const THREADS: usize = 2;
     const ITERS_PER_THREAD: usize = 1;
     let seeder: SharedBufferRng::<8,4> = SharedBufferRng::new(BlockRng64::new(
