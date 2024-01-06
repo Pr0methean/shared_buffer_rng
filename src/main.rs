@@ -51,7 +51,7 @@ fn main() {
     WORDS.get_or_init(Bag::new);
     const THREADS: usize = 4;
     const ITERS_PER_THREAD: usize = 256;
-    let shared_seeder = SharedBufferRng::<1,128,_>::new(BlockRng::new(
+    let shared_seeder = SharedBufferRng::<1,128>::new(BlockRng::new(
         ByteValuesInOrderRng { words_written: AtomicUsize::new(0)}));
     fence(SeqCst);
     let ths: Vec<_> = (0..THREADS)

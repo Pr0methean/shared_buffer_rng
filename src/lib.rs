@@ -1,15 +1,12 @@
-use std::iter::repeat_with;
 #[cfg(not(loom))]
-use std::{sync::{Arc, Weak, Mutex, atomic::{AtomicUsize, Ordering}}, thread::{spawn, yield_now}, cell::UnsafeCell};
+use std::{sync::{Arc, atomic::{AtomicUsize}}, thread::{spawn, yield_now}, cell::UnsafeCell};
 use std::fmt::Debug;
 use std::slice;
-use std::sync::atomic::Ordering::SeqCst;
-#[cfg(loom)]
-use loom::{sync::{Arc, Mutex, atomic::{AtomicBool, AtomicUsize, Ordering}}, thread::{spawn, yield_now}, cell::UnsafeCell};
-use log::info;
+use async_channel::{Receiver};
+use log::{error, info};
 use rand::Rng;
 use rand::rngs::OsRng;
-use rand_core::{CryptoRng};
+use rand_core::{CryptoRng, RngCore};
 use rand_core::block::{BlockRng64, BlockRngCore};
 
 #[derive(Debug)]
@@ -24,21 +21,10 @@ impl<T> SyncUnsafeCell<T> {
         f(self.0.get().as_ref().unwrap())
     }
 
-    #[allow(unused)]
-    #[cfg(loom)]
-    pub(crate) unsafe fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R {
-        f(self.0.get().deref())
-    }
-
-    #[cfg(not(loom))]
     pub(crate) unsafe fn with_mut<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
         f(self.0.get().as_mut().unwrap())
     }
 
-    #[cfg(loom)]
-    pub(crate) unsafe fn with_mut<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
-        f(self.0.get_mut().deref())
-    }
 }
 
 impl <T> From<T> for SyncUnsafeCell<T> {
@@ -50,19 +36,12 @@ impl <T> From<T> for SyncUnsafeCell<T> {
 unsafe impl <T> Sync for SyncUnsafeCell<T> {}
 
 #[derive(Debug)]
-struct SharedBufferRngInner<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, T: Rng> {
-    started_reading: AtomicUsize,
-    started_writing: AtomicUsize,
-    finished_writing: AtomicUsize,
-    buffer: [Mutex<[u64; WORDS_PER_SEED]>; SEEDS_CAPACITY],
-    // SAFETY: only accessed by one thread
-    inner: SyncUnsafeCell<T>,
-    #[cfg(loom)]
-    closed: AtomicBool
+struct SharedBufferRngInner<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize> {
+    receiver: Receiver<[u64; WORDS_PER_SEED]>,
 }
 
-unsafe impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, T: Rng + Send> Sync
-for SharedBufferRngInner<WORDS_PER_SEED, SEEDS_CAPACITY, T> {}
+unsafe impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize> Sync
+for SharedBufferRngInner<WORDS_PER_SEED, SEEDS_CAPACITY> {}
 
 pub struct DefaultableArray<const N: usize, T>([T; N]);
 
@@ -84,177 +63,47 @@ impl <const N: usize, T> AsRef<[T]> for DefaultableArray<N, T> {
     }
 }
 
-impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, T: Rng + Send>
-SharedBufferRngInner<WORDS_PER_SEED, SEEDS_CAPACITY, T> {
-    fn fill(&self) -> bool {
-        let write_start = self.started_writing.fetch_add(SEEDS_CAPACITY, Ordering::SeqCst);
-        let read = self.started_reading.load(Ordering::SeqCst);
-        if write_start >= read {
-            // Buffer is full
-            self.started_writing.fetch_sub(SEEDS_CAPACITY, Ordering::SeqCst);
-            return false;
-        }
-        let mut write_end = write_start + SEEDS_CAPACITY;
-        let mut actual_size = SEEDS_CAPACITY;
-        if write_end > read + SEEDS_CAPACITY {
-            // Short write
-            actual_size -= write_end - (read + SEEDS_CAPACITY);
-            self.started_writing.fetch_sub(SEEDS_CAPACITY - actual_size, Ordering::SeqCst);
-            write_end = read + SEEDS_CAPACITY;
-        }
-        let write_start_index = write_start % SEEDS_CAPACITY;
-        let mut write_end_index = write_end % SEEDS_CAPACITY;
-        if write_end_index == 0 {
-            write_end_index = SEEDS_CAPACITY;
-        }
-        // SAFETY: above bounds checks prevent reading bytes while they're still being written
-        unsafe {
-            self.inner.with_mut(|inner|
-                if write_end_index > write_start_index {
-                    self.fill_range(write_start_index, write_end_index, inner);
-                } else {
-                    self.fill_range(write_start_index, SEEDS_CAPACITY, inner);
-                    self.fill_range(0, write_end_index, inner);
-                });
-        }
-        true
-    }
-
-    fn fill_range(&self, write_start_index: usize, write_end_index: usize, inner: &mut T) {
-        self.buffer[write_start_index..write_end_index].iter().for_each(|seed| {
-            seed.lock().unwrap().iter_mut().for_each(|word| *word
-                = inner.next_u64());
-            self.finished_writing.fetch_add(1, Ordering::SeqCst);
-        });
-    }
-
-    fn read_range(&self, write_start_index: usize, write_end_index: usize, out: &mut [[u64; WORDS_PER_SEED]]) {
-        out.iter_mut().zip(&self.buffer[write_start_index..write_end_index]).for_each(
-            |(out, seed)| out.copy_from_slice(seed.lock().unwrap().as_slice()));
-    }
-
-    fn poll(&self, out: &mut [[u64; WORDS_PER_SEED]]) -> usize {
-        let desired_size = out.len().min(SEEDS_CAPACITY);
-        if desired_size == 0 {
-            return 0;
-        }
-        let read_start = self.started_reading.fetch_add(desired_size, Ordering::SeqCst);
-        let written = self.finished_writing.load(Ordering::SeqCst);
-        if read_start >= written {
-            // Buffer is empty
-            self.started_reading.fetch_sub(desired_size, Ordering::SeqCst);
-            return 0;
-        }
-        let mut read_end = read_start + desired_size;
-        let mut actual_size = desired_size;
-        if read_end > written {
-            // Short read
-            actual_size -= read_end - written;
-            read_end = written;
-            self.started_reading.fetch_sub(desired_size - actual_size, Ordering::SeqCst);
-        }
-        let read_start = read_start % SEEDS_CAPACITY;
-        let mut read_end = read_end % SEEDS_CAPACITY;
-        if read_end == 0 {
-            read_end = SEEDS_CAPACITY;
-        }
-        if read_end > read_start {
-            self.read_range(read_start, read_end, out);
-        } else {
-            let bytes_before_wrap = SEEDS_CAPACITY - read_start;
-            self.read_range(read_start, SEEDS_CAPACITY, &mut out[0..bytes_before_wrap]);
-            self.read_range(0, read_end, &mut out[bytes_before_wrap..]);
-        }
-        return actual_size;
-    }
-}
-
 #[derive(Debug)]
-pub struct SharedBufferRng<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, T: Rng + Send>
-(Arc<SyncUnsafeCell<SharedBufferRngInner<WORDS_PER_SEED, SEEDS_CAPACITY, T>>>);
+pub struct SharedBufferRng<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize>
+(Arc<SyncUnsafeCell<SharedBufferRngInner<WORDS_PER_SEED, SEEDS_CAPACITY>>>);
 
-impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, T: Rng + Send> Clone for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, T> {
+impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize> Clone for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY> {
     fn clone(&self) -> Self {
         SharedBufferRng(self.0.clone())
     }
 }
 
-pub type SharedBufferRngStd = SharedBufferRng<8, 16, OsRng>;
+pub type SharedBufferRngStd = SharedBufferRng<8, 16>;
 
-impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, T: Rng + Send + 'static>
-SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, T> {
-    #[cfg(loom)]
-    #[inline]
-    fn downgrade(arc: &Arc<SyncUnsafeCell<SharedBufferRngInner<WORDS_PER_SEED, SEEDS_CAPACITY, T>>>)
-                 -> Arc<SyncUnsafeCell<SharedBufferRngInner<WORDS_PER_SEED, SEEDS_CAPACITY, T>>> {
-        arc.clone()
-    }
-
-    #[cfg(not(loom))]
-    #[inline]
-    fn downgrade(arc: &Arc<SyncUnsafeCell<SharedBufferRngInner<WORDS_PER_SEED, SEEDS_CAPACITY, T>>>)
-                 -> Weak<SyncUnsafeCell<SharedBufferRngInner<WORDS_PER_SEED, SEEDS_CAPACITY, T>>> {
-        Arc::downgrade(arc)
-    }
-
-    #[cfg(loom)]
-    #[inline]
-    fn upgrade(arc: &Arc<SyncUnsafeCell<SharedBufferRngInner<WORDS_PER_SEED, SEEDS_CAPACITY, T>>>)
-               -> Option<&Arc<SyncUnsafeCell<SharedBufferRngInner<WORDS_PER_SEED, SEEDS_CAPACITY, T>>>> {
-        if unsafe { arc.0.with(|inner| (*inner).closed.load(SeqCst)) } {
-            None
-        } else {
-            Some(arc)
-        }
-    }
-
-    #[cfg(all(loom,test))]
-    fn close(&self) {
-        unsafe {
-            self.0.with(|inner| (*inner).closed.fetch_or(true, SeqCst));
-        }
-    }
-
-    #[cfg(not(loom))]
-    #[inline]
-    fn upgrade(weak: &Weak<SyncUnsafeCell<SharedBufferRngInner<WORDS_PER_SEED, SEEDS_CAPACITY, T>>>)
-               -> Option<Arc<SyncUnsafeCell<SharedBufferRngInner<WORDS_PER_SEED, SEEDS_CAPACITY, T>>>> {
-        weak.upgrade()
-    }
-}
-
-impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, T: Rng + Send + Debug + 'static>
-SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, T> {
-    pub fn new_master_rng(inner: T) -> BlockRng64<Self> {
+impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize>
+SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY> {
+    pub fn new_master_rng<T: Rng + Send + Debug + 'static>(inner: T) -> BlockRng64<Self> {
         BlockRng64::new(Self::new(inner))
     }
 
-    pub fn new(inner: T) -> Self {
+    pub fn new<T: Rng + Send + Debug + 'static>(inner_inner: T) -> Self {
+        let (sender, receiver) = async_channel::bounded(SEEDS_CAPACITY);
+        info!("Creating a SharedBufferRngInner for {:?}", inner_inner);
+        let inner_inner = SyncUnsafeCell::from(inner_inner);
         let inner = Arc::new(SyncUnsafeCell::from(SharedBufferRngInner {
-            started_reading: 0.into(),
-            started_writing: 0.into(),
-            finished_writing: 0.into(),
-            buffer: repeat_with(|| Mutex::new([0; WORDS_PER_SEED])).take(SEEDS_CAPACITY).collect::<Vec<_>>().try_into().ok().unwrap(),
-            inner: inner.into(),
-            #[cfg(loom)]
-            closed: false.into()
+            receiver
         }));
-        let inner_weak = Self::downgrade(&inner);
+        let weak_sender = sender.downgrade();
         spawn(move || {
-            info!("Starting the writer thread for {:?}", inner_weak);
+            let mut seed_from_source = [0; WORDS_PER_SEED];
             loop {
-                match Self::upgrade(&inner_weak) {
-                    // SAFETY: This thread is the only one that mutates inner
-                    Some(inner) => unsafe {
-                        inner.with(|inner| {
-                            if !inner.fill() {
-                                yield_now();
+                match weak_sender.upgrade() {
+                    None => return,
+                    Some(sender) => unsafe {
+                        inner_inner.with_mut(
+                            |inner_inner| seed_from_source.iter_mut().for_each(
+                                |word| *word = inner_inner.next_u64()));
+                        while !sender.send_blocking(seed_from_source).is_ok() {
+                            if weak_sender.upgrade().is_none() {
+                                return;
                             }
-                        })
-                    },
-                    None => {
-                        info!("Writer thread exiting");
-                        return
+                            yield_now();
+                        }
                     }
                 }
             }
@@ -263,8 +112,8 @@ SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, T> {
     }
 }
 
-impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, T: Rng + Send> BlockRngCore
-for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, T> {
+impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize> BlockRngCore
+for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY> {
     type Item = u64;
     type Results = DefaultableArray<WORDS_PER_SEED, u64>;
 
@@ -273,9 +122,15 @@ for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, T> {
         unsafe {
             loop {
                 self.0.with(|inner|
-                    match inner.poll(results) {
-                        0 => yield_now(),
-                        _ => return
+                    match inner.receiver.recv_blocking() {
+                        Ok(seed) => {
+                            results[0].copy_from_slice(&seed);
+                            return;
+                        },
+                        Err(e) => {
+                            error!("Error from recv_blocking(): {}", e);
+                            yield_now();
+                        }
                     }
                 );
             }
@@ -283,14 +138,12 @@ for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, T> {
     }
 }
 
-impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, T: Rng + Send> CryptoRng for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, T> {}
+impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize> CryptoRng for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY> {}
 
 #[cfg(test)]
 mod tests {
     #[cfg(not(loom))]
     use core::sync::atomic::{AtomicUsize, Ordering::SeqCst};
-    #[cfg(loom)]
-    use loom::sync::atomic::{AtomicUsize, Ordering::SeqCst};
     use rand_core::block::{BlockRng64, BlockRngCore};
     #[cfg(not(loom))]
     use rand_core::{Error};
@@ -325,44 +178,5 @@ mod tests {
         let zero_seed_prng = StdRng::from_seed([0; 32]);
         assert_ne!(client_prng, zero_seed_prng);
         Ok(())
-    }
-
-    #[cfg(loom)]
-    loom::lazy_static! {
-        static ref WORDS: scc::Bag<u64> = scc::Bag::new();
-    }
-    #[cfg(loom)]
-    #[test_log::test]
-    fn loom_test_at_most_once_delivery() {
-        use loom::model::Builder;
-        use rand::RngCore;
-        const THREADS: usize = 2;
-        const ITERS_PER_THREAD: usize = 1;
-        let mut builder = Builder::default();
-        builder.max_threads = THREADS + 2; // include filler thread and test thread
-        builder.max_branches = 300_000;
-        builder.check(|| {
-            let seeder: SharedBufferRng::<8,4,_> = SharedBufferRng::new(BlockRng64::new(
-                ByteValuesInOrderRng { words_written: AtomicUsize::new(0)}));
-            let ths: Vec<_> = (0..THREADS)
-                .map(|_| {
-                    let mut seeder_clone = BlockRng64::new(seeder.clone());
-                    loom::thread::spawn(move || {
-                        for _ in 0..ITERS_PER_THREAD {
-                            WORDS.push(seeder_clone.next_u64());
-                        }
-                    })
-                })
-                .collect();
-            for th in ths {
-                th.join().unwrap();
-            }
-            let mut words_sorted = Vec::new();
-            WORDS.pop_all((), |(), word| words_sorted.push(word));
-            let mut words_dedup = words_sorted.clone();
-            words_dedup.dedup();
-            assert_eq!(words_dedup.len(), words_sorted.len());
-            seeder.close();
-        });
     }
 }
