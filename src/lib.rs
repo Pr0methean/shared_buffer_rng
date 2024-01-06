@@ -105,7 +105,7 @@ impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize> CryptoRng for Sh
 #[cfg(test)]
 mod tests {
     use core::sync::atomic::{AtomicUsize, Ordering::SeqCst};
-    use std::sync::OnceLock;
+    use std::sync::{OnceLock};
     use rand_core::block::{BlockRng64, BlockRngCore};
     use rand_core::{Error};
     use scc::Bag;
@@ -145,9 +145,9 @@ mod tests {
     static WORDS: OnceLock<Bag<u64>> = OnceLock::new();
 
     #[test_log::test]
-    fn loom_test_at_most_once_delivery() {
+    fn test_at_most_once_delivery() {
+        use rand_core::RngCore;
         WORDS.get_or_init(Bag::new);
-        use rand::RngCore;
         const THREADS: usize = 2;
         const ITERS_PER_THREAD: usize = 1;
         let seeder: SharedBufferRng::<8,4> = SharedBufferRng::new(BlockRng64::new(

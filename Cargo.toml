@@ -10,7 +10,7 @@ rand = "0.8.5"
 rand_core = "0.6.4"
 log = "0.4.20"
 async-channel = "2.1.1"
-scc = "2.0.8"
 
 [dev-dependencies]
 test-log = "0.2.14"
+scc = "2.0.8"
