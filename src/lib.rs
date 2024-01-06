@@ -13,6 +13,7 @@ use rand_core::{CryptoRng};
 use rand_core::block::{BlockRng64, BlockRngCore};
 
 #[derive(Debug)]
+#[repr(transparent)]
 pub(crate) struct SyncUnsafeCell<T>(UnsafeCell<T>);
 
 // Reimplemented so that we can use same API in loom
