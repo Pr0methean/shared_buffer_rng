@@ -2,7 +2,7 @@ use std::{sync::Arc, thread::{spawn, yield_now}};
 use std::fmt::Debug;
 use std::slice;
 use async_channel::{Receiver, Sender};
-use log::{info};
+use log::{error, info};
 use rand::Rng;
 use rand::rngs::OsRng;
 use rand_core::{CryptoRng};
@@ -50,17 +50,22 @@ SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY> {
         let weak_sender = sender.clone().downgrade();
         spawn(move || {
             let mut seed_from_source = [0; WORDS_PER_SEED];
-            loop {
+            'outer: loop {
                 match weak_sender.upgrade() {
                     None => return,
                     Some(sender) => {
                         seed_from_source.iter_mut().for_each(
                                 |word| *word = inner_inner.next_u64());
-                        while !sender.send_blocking(seed_from_source).is_ok() {
-                            if weak_sender.upgrade().is_none() {
+                        loop {
+                            let result = sender.send_blocking(seed_from_source);
+                            if result.is_ok() {
+                                continue 'outer;
+                            } else {
+                                if !weak_sender.upgrade().is_none() {
+                                    error!("Error writing to shared buffer: {:?}", result);
+                                }
                                 return;
                             }
-                            yield_now();
                         }
                     }
                 }
