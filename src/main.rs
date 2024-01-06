@@ -1,11 +1,11 @@
 use std::sync::atomic::Ordering::SeqCst;
-use core::sync::atomic::{AtomicUsize, fence};
+use core::sync::atomic::{AtomicUsize};
 use std::sync::OnceLock;
 use rand_core::RngCore;
-use rand_core::block::{BlockRng, BlockRng64, BlockRngCore};
+use rand_core::block::{BlockRng64, BlockRngCore};
 use scc::Bag;
 use shared_buffer_rng::SharedBufferRng;
-use std::thread;
+use std::thread::spawn;
 
 const U8_VALUES: usize = u8::MAX as usize + 1;
 
@@ -14,7 +14,7 @@ struct ByteValuesInOrderRng {
     words_written: AtomicUsize
 }
 
-struct DefaultableByteArray([u32; U8_VALUES]);
+struct DefaultableByteArray([u64; U8_VALUES]);
 
 impl Default for DefaultableByteArray {
     fn default() -> Self {
@@ -22,45 +22,44 @@ impl Default for DefaultableByteArray {
     }
 }
 
-impl AsMut<[u32]> for DefaultableByteArray {
-    fn as_mut(&mut self) -> &mut [u32] {
+impl AsMut<[u64]> for DefaultableByteArray {
+    fn as_mut(&mut self) -> &mut [u64] {
         self.0.as_mut()
     }
 }
 
-impl AsRef<[u32]> for DefaultableByteArray {
-    fn as_ref(&self) -> &[u32] {
+impl AsRef<[u64]> for DefaultableByteArray {
+    fn as_ref(&self) -> &[u64] {
         self.0.as_ref()
     }
 }
 
 impl BlockRngCore for ByteValuesInOrderRng {
-    type Item = u32;
+    type Item = u64;
     type Results = DefaultableByteArray;
 
     fn generate(&mut self, results: &mut Self::Results) {
         let first_word = self.words_written.fetch_add(U8_VALUES, SeqCst);
 
         results.0.iter_mut().zip(first_word..first_word + U8_VALUES)
-            .for_each(|(result_word, word_num)| *result_word = word_num as u32);
+            .for_each(|(result_word, word_num)| *result_word = word_num as u64);
     }
 }
 
 const WORDS: OnceLock<Bag<u64>> = OnceLock::new();
 fn main() {
     WORDS.get_or_init(Bag::new);
-    const THREADS: usize = 4;
-    const ITERS_PER_THREAD: usize = 256;
-    let shared_seeder = SharedBufferRng::<1,128>::new(BlockRng::new(
+    use rand::RngCore;
+    const THREADS: usize = 2;
+    const ITERS_PER_THREAD: usize = 1;
+    let seeder: SharedBufferRng::<8,4> = SharedBufferRng::new(BlockRng64::new(
         ByteValuesInOrderRng { words_written: AtomicUsize::new(0)}));
-    fence(SeqCst);
     let ths: Vec<_> = (0..THREADS)
         .map(|_| {
-            let mut seeder = BlockRng64::new(shared_seeder.clone());
-            thread::spawn(move || {
+            let mut seeder_clone = BlockRng64::new(seeder.clone());
+            spawn(move || {
                 for _ in 0..ITERS_PER_THREAD {
-                    let next_word = seeder.next_u64();
-                    WORDS.get().unwrap().push(next_word);
+                    WORDS.get().unwrap().push(seeder_clone.next_u64());
                 }
             })
         })
@@ -68,7 +67,6 @@ fn main() {
     for th in ths {
         th.join().unwrap();
     }
-    fence(SeqCst);
     let mut words_sorted = Vec::new();
     WORDS.get().unwrap().pop_all((), |(), word| words_sorted.push(word));
     let mut words_dedup = words_sorted.clone();
