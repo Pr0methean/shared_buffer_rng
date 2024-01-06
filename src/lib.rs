@@ -1,6 +1,7 @@
 use std::{sync::Arc, thread::{spawn, yield_now}};
 use std::fmt::Debug;
 use std::slice;
+use std::thread::Builder;
 use async_channel::{Receiver, Sender};
 use log::{error, info};
 use rand::Rng;
@@ -48,11 +49,14 @@ SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY> {
         info!("Creating a SharedBufferRngInner for {:?}", inner_inner);
         let inner = receiver.clone();
         let weak_sender = sender.clone().downgrade();
-        spawn(move || {
+        Builder::new().name(format!("Load seed from {:?} into shared buffer", inner_inner)).spawn(move || {
             let mut seed_from_source = [0; WORDS_PER_SEED];
             'outer: loop {
                 match weak_sender.upgrade() {
-                    None => return,
+                    None => {
+                        info!("Detected that a seed channel is no longer open for receiving");
+                        return
+                    },
                     Some(sender) => {
                         seed_from_source.iter_mut().for_each(
                                 |word| *word = inner_inner.next_u64());
@@ -62,7 +66,8 @@ SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY> {
                                 continue 'outer;
                             } else {
                                 if weak_sender.upgrade().is_none() {
-                                    info!("Detected that a seed channel is no longer open for receiving");
+                                    info!("Detected (with seed already fetched) that a seed channel is no longer open \
+                                    for receiving");
                                 } else {
                                     error!("Error writing to shared buffer: {:?}", result);
                                 }
@@ -72,7 +77,7 @@ SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY> {
                     }
                 }
             }
-        });
+        }).unwrap();
         while receiver.is_empty() {
             yield_now();
         }
