@@ -2,6 +2,7 @@ use std::{sync::Arc, thread::{yield_now}};
 use std::fmt::Debug;
 use std::slice;
 use std::thread::Builder;
+use aligned::{A64, Aligned};
 use async_channel::{Receiver, Sender};
 use log::{error, info};
 use rand::Rng;
@@ -32,8 +33,8 @@ impl <const N: usize, T> AsRef<[T]> for DefaultableArray<N, T> {
 #[derive(Clone, Debug)]
 pub struct SharedBufferRng<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize> {
     // Needed to keep the weak sender reachable as long as the receiver is strongly reachable
-    _sender: Arc<Sender<[u64; WORDS_PER_SEED]>>,
-    receiver: Receiver<[u64; WORDS_PER_SEED]>
+    _sender: Arc<Sender<Aligned<A64, [u64; WORDS_PER_SEED]>>>,
+    receiver: Receiver<Aligned<A64, [u64; WORDS_PER_SEED]>>
 }
 
 pub type SharedBufferRngStd = SharedBufferRng<8, 16>;
@@ -50,7 +51,7 @@ SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY> {
         let inner = receiver.clone();
         let weak_sender = sender.clone().downgrade();
         Builder::new().name(format!("Load seed from {:?} into shared buffer", inner_inner)).spawn(move || {
-            let mut seed_from_source = [0; WORDS_PER_SEED];
+            let mut seed_from_source = Aligned([0; WORDS_PER_SEED]);
             'outer: loop {
                 match weak_sender.upgrade() {
                     None => {
@@ -98,7 +99,7 @@ for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY> {
         let results: &mut [[u64; WORDS_PER_SEED]] = slice::from_mut(&mut results.0).into();
         match self.receiver.recv_blocking() {
             Ok(seed) => {
-                results[0].copy_from_slice(&seed);
+                results[0].copy_from_slice(seed.as_slice());
                 return;
             },
             Err(e) => panic!("Error from recv_blocking(): {}", e)
