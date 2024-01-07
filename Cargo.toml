@@ -12,5 +12,4 @@ log = "0.4.20"
 async-channel = "2.1.1"
 
 [dev-dependencies]
-test-log = "0.2.14"
 scc = "2.0.8"

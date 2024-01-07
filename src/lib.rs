@@ -115,6 +115,7 @@ mod tests {
     use rand_core::block::{BlockRng64, BlockRngCore};
     use rand_core::{Error};
     use scc::Bag;
+    use std::thread::spawn;
     use super::*;
 
     const U8_VALUES: usize = u8::MAX as usize + 1;
@@ -136,7 +137,6 @@ mod tests {
         }
     }
 
-    #[cfg(not(loom))]
     #[test]
     fn basic_test() -> Result<(), Error>{
         use rand::rngs::StdRng;
@@ -150,7 +150,7 @@ mod tests {
 
     static WORDS: OnceLock<Bag<u64>> = OnceLock::new();
 
-    #[test_log::test]
+    #[test]
     fn test_at_most_once_delivery() {
         use rand_core::RngCore;
         WORDS.get_or_init(Bag::new);
