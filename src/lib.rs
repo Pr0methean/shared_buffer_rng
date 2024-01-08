@@ -7,11 +7,13 @@ use aligned::{A64, Aligned};
 use async_channel::{Receiver, Sender};
 use log::{error, info};
 use rand::Rng;
-use rand::rngs::OsRng;
-use rand_core::{CryptoRng, Error, RngCore};
+use rand::rngs::{OsRng};
+use rand_core::{CryptoRng, Error, RngCore, SeedableRng};
 use rand_core::block::{BlockRng64, BlockRngCore};
 use std::cell::{UnsafeCell};
 use std::rc::Rc;
+use rand::rngs::adapter::ReseedingRng;
+use rand_chacha::ChaCha12Core;
 
 pub struct DefaultableAlignedArray<const N: usize, T>(Aligned<A64, [T; N]>);
 
@@ -103,6 +105,13 @@ RngCore for ThreadLocalSeeder<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType> {
 
 pub fn thread_seeder() -> ThreadLocalSeeder<8, 16, OsRng> {
     DEFAULT_FOR_THREAD.with(ThreadLocalSeeder::clone)
+}
+
+pub fn thread_rng() -> ReseedingRng<ChaCha12Core, ThreadLocalSeeder<8, 16, OsRng>> {
+    let mut reseeder = thread_seeder();
+    let mut seed = <ChaCha12Core as SeedableRng>::Seed::default();
+    reseeder.fill_bytes(&mut seed);
+    ReseedingRng::new(ChaCha12Core::from_seed(seed), 1 << 16, reseeder)
 }
 
 impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize>

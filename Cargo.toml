@@ -8,9 +8,10 @@ edition = "2021"
 [dependencies]
 rand = "0.8.5"
 rand_core = "0.6.4"
+rand_chacha = "0.3.1"
 log = "0.4.20"
 async-channel = "2.1.1"
 aligned = "0.4.1"
 
 [dev-dependencies]
-scc = "2.0.8"
+scc = "2.0.9"
