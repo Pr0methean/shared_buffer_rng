@@ -1,6 +1,5 @@
 use std::{sync::Arc, thread::{yield_now}};
 use std::fmt::Debug;
-use std::slice;
 use std::thread::Builder;
 use aligned::{A64, Aligned};
 use async_channel::{Receiver, Sender};
@@ -10,21 +9,21 @@ use rand::rngs::OsRng;
 use rand_core::{CryptoRng};
 use rand_core::block::{BlockRng64, BlockRngCore};
 
-pub struct DefaultableArray<const N: usize, T>([T; N]);
+pub struct DefaultableAlignedArray<const N: usize, T>(Aligned<A64, [T; N]>);
 
-impl <const N: usize, T: Default + Copy> Default for DefaultableArray<N, T> {
+impl <const N: usize, T: Default + Copy> Default for DefaultableAlignedArray<N, T> {
     fn default() -> Self {
-        DefaultableArray([T::default(); N])
+        DefaultableAlignedArray(Aligned([T::default(); N]))
     }
 }
 
-impl <const N: usize, T> AsMut<[T]> for DefaultableArray<N, T> {
+impl <const N: usize, T> AsMut<[T]> for DefaultableAlignedArray<N, T> {
     fn as_mut(&mut self) -> &mut [T] {
         self.0.as_mut()
     }
 }
 
-impl <const N: usize, T> AsRef<[T]> for DefaultableArray<N, T> {
+impl <const N: usize, T> AsRef<[T]> for DefaultableAlignedArray<N, T> {
     fn as_ref(&self) -> &[T] {
         self.0.as_ref()
     }
@@ -93,13 +92,12 @@ SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY> {
 impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize> BlockRngCore
 for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY> {
     type Item = u64;
-    type Results = DefaultableArray<WORDS_PER_SEED, u64>;
+    type Results = DefaultableAlignedArray<WORDS_PER_SEED, u64>;
 
     fn generate(&mut self, results: &mut Self::Results) {
-        let results: &mut [[u64; WORDS_PER_SEED]] = slice::from_mut(&mut results.0).into();
         match self.receiver.recv_blocking() {
             Ok(seed) => {
-                results[0].copy_from_slice(seed.as_slice());
+                *results.0 = *seed;
                 return;
             },
             Err(e) => panic!("Error from recv_blocking(): {}", e)
@@ -128,7 +126,7 @@ mod tests {
 
     impl BlockRngCore for ByteValuesInOrderRng {
         type Item = u64;
-        type Results = DefaultableArray<1,u64>;
+        type Results = DefaultableAlignedArray<1,u64>;
 
         fn generate(&mut self, results: &mut Self::Results) {
             let first_word = self.words_written.fetch_add(U8_VALUES, SeqCst);
@@ -157,7 +155,7 @@ mod tests {
         WORDS.get_or_init(Bag::new);
         const THREADS: usize = 2;
         const ITERS_PER_THREAD: usize = 1;
-        let seeder: SharedBufferRng::<8,4> = SharedBufferRng::new(BlockRng64::new(
+        let seeder: SharedBufferRng<8,4> = SharedBufferRng::new(BlockRng64::new(
             ByteValuesInOrderRng { words_written: AtomicUsize::new(0)}));
         let ths: Vec<_> = (0..THREADS)
             .map(|_| {
