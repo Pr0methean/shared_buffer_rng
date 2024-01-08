@@ -40,6 +40,7 @@ pub struct SharedBufferRng<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: us
     // Needed to keep the weak sender reachable as long as the receiver is strongly reachable
     _sender: Arc<Sender<Aligned<A64, [u64; WORDS_PER_SEED]>>>,
     receiver: Receiver<Aligned<A64, [u64; WORDS_PER_SEED]>>,
+    // Used to determine whether to implement CryptoRng
     _source: PhantomData<SourceType>
 }
 
