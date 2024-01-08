@@ -58,6 +58,7 @@ pub type SharedBufferRngStd = SharedBufferRng<8, 16, OsRng>;
 static DEFAULT_ROOT: OnceLock<SharedBufferRngStd> = OnceLock::new();
 
 #[derive(Clone, Debug)]
+#[repr(transparent)]
 pub struct ThreadLocalSeeder<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType>
 (Rc<UnsafeCell<BlockRng64<SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType>>>>);
 
