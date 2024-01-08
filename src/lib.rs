@@ -15,6 +15,10 @@ use std::rc::Rc;
 use rand::rngs::adapter::ReseedingRng;
 use rand_chacha::ChaCha12Core;
 
+// Alignment is chosen to prevent "false sharing" (i.e. instance A and instance B being part of or straddling the same
+// cache line, which would prevent &mut A from being used concurrently with &B or &mut B because only one CPU core can
+// have a given cache line in the modified state). All modern x86, ARM, x86-64 and Aarch64 CPUs have 64-byte cache
+// lines. TODO: Find a future-proof way to choose the right alignment for obscure architectures.
 pub struct DefaultableAlignedArray<const N: usize, T>(Aligned<A64, [T; N]>);
 
 impl <const N: usize, T: Default + Copy> Default for DefaultableAlignedArray<N, T> {
@@ -35,6 +39,7 @@ impl <const N: usize, T> AsRef<[T]> for DefaultableAlignedArray<N, T> {
     }
 }
 
+/// The core of a SharedBufferRng. Will share the seed source, the source-reading thread and the buffer with all clones.
 #[derive(Debug)]
 pub struct SharedBufferRng<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType> {
     // Needed to keep the weak sender reachable as long as the receiver is strongly reachable
@@ -47,6 +52,7 @@ pub struct SharedBufferRng<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: us
 // Can't derive Clone because that would only work for SourceType: Clone but we don't actually clone the source
 impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType> Clone
 for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType> {
+    /// Returns a new SharedBufferRng view on the same buffer.
     fn clone(&self) -> Self {
         SharedBufferRng {
             _sender: self._sender.clone(),
@@ -60,17 +66,23 @@ pub type SharedBufferRngStd = SharedBufferRng<8, 16, OsRng>;
 
 static DEFAULT_ROOT: OnceLock<SharedBufferRngStd> = OnceLock::new();
 
+/// Wrapper around [SharedBufferRng] that can be cloned for each thread in a [thread_local!] static variable. All clones
+/// will use the same buffer and seed source.
 #[derive(Clone, Debug)]
 #[repr(transparent)]
 pub struct ThreadLocalSeeder<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType>
 (Rc<UnsafeCell<BlockRng64<SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType>>>>);
 
 impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType>
-ThreadLocalSeeder<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType> {
-    fn new(source: SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType>) -> Self {
+From<SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType>>
+for ThreadLocalSeeder<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType> {
+    fn from(source: SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType>) -> Self {
         ThreadLocalSeeder(Rc::new(UnsafeCell::new(BlockRng64::new(source))))
     }
+}
 
+impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType>
+ThreadLocalSeeder<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType> {
     fn get_mut(&self) -> &mut BlockRng64<SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType>> {
         // SAFETY: Same as impl RngCore for ThreadRng: https://rust-random.github.io/rand/src/rand/rngs/thread.rs.html
         unsafe {
@@ -81,7 +93,7 @@ ThreadLocalSeeder<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType> {
 
 thread_local! {
     static DEFAULT_FOR_THREAD: ThreadLocalSeeder<8, 16, OsRng>
-        = ThreadLocalSeeder::new(DEFAULT_ROOT.get_or_init(|| SharedBufferRngStd::new(OsRng::default())).clone());
+        = ThreadLocalSeeder::from(DEFAULT_ROOT.get_or_init(|| SharedBufferRngStd::new(OsRng::default())).clone());
 }
 
 
@@ -104,10 +116,14 @@ RngCore for ThreadLocalSeeder<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType> {
     }
 }
 
+/// Gets this thread's instance of [ThreadLocalSeeder] backed by the shared default instance of [SharedBufferRng].
 pub fn thread_seeder() -> ThreadLocalSeeder<8, 16, OsRng> {
     DEFAULT_FOR_THREAD.with(ThreadLocalSeeder::clone)
 }
 
+/// Creates a PRNG that's identical to [rand::thread_rng]() except that it uses [thread_seeder]() to combine reads from
+/// [OsRng] with those that other threads will need later, rather than having them contend for access to the system's
+/// entropy pool. Intended as a drop-in replacement for [rand::thread_rng]().
 pub fn thread_rng() -> ReseedingRng<ChaCha12Core, ThreadLocalSeeder<8, 16, OsRng>> {
     let mut reseeder = thread_seeder();
     let mut seed = <ChaCha12Core as SeedableRng>::Seed::default();
@@ -115,15 +131,10 @@ pub fn thread_rng() -> ReseedingRng<ChaCha12Core, ThreadLocalSeeder<8, 16, OsRng
     ReseedingRng::new(ChaCha12Core::from_seed(seed), 1 << 16, reseeder)
 }
 
-impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize>
-SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, OsRng> {
-    pub fn new_master_rng() -> BlockRng64<Self> {
-        BlockRng64::new(Self::new(OsRng::default()))
-    }
-}
-
 impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType: Rng + Send + Debug + 'static>
     SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType> {
+    /// Creates an RNG that will have a dedicated thread reading from [source] into a buffer that's shared with all
+    /// clones of this [SharedBufferRng], as long as it or a clone still exists.
     pub fn new(mut source: SourceType) -> Self {
         let (sender, receiver) = async_channel::bounded(SEEDS_CAPACITY);
         info!("Creating a SharedBufferRngInner for {:?}", source);
