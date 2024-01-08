@@ -39,7 +39,9 @@ impl <const N: usize, T> AsRef<[T]> for DefaultableAlignedArray<N, T> {
     }
 }
 
-/// The core of a SharedBufferRng. Will share the seed source, the source-reading thread and the buffer with all clones.
+/// An RNG that reads from a shared buffer, to which only one thread per buffer will read from a seed source. It will
+/// share the buffer with all of its clones. Once this and all clones have been dropped, the source-reading thread will
+/// detect this using a [std::sync::Weak] reference and terminate.
 #[derive(Debug)]
 pub struct SharedBufferRng<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType> {
     // Needed to keep the weak sender reachable as long as the receiver is strongly reachable
@@ -67,7 +69,9 @@ pub type SharedBufferRngStd = SharedBufferRng<8, 16, OsRng>;
 static DEFAULT_ROOT: OnceLock<SharedBufferRngStd> = OnceLock::new();
 
 /// Wrapper around [SharedBufferRng] that can be cloned for each thread in a [thread_local!] static variable. All clones
-/// will use the same buffer and seed source.
+/// will use the same buffer and seed source, and only one thread will read from that seed source no matter how many
+/// clones exist. Since this RNG is used to implement [BlockRngCore] for instances of [BlockRng64], it can produce seeds
+/// of any desired size, but a `[u64; [WORDS_PER_SEED]]` will be fastest.
 #[derive(Clone, Debug)]
 #[repr(transparent)]
 pub struct ThreadLocalSeeder<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType>
@@ -76,6 +80,8 @@ pub struct ThreadLocalSeeder<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: 
 impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType>
 From<SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType>>
 for ThreadLocalSeeder<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType> {
+    /// Note that this [ThreadLocalSeeder] prevents its source from being dropped and its reader thread from being
+    /// dropped, even when its clones on the threads consuming seeds have all been dropped.
     fn from(source: SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType>) -> Self {
         ThreadLocalSeeder(Rc::new(UnsafeCell::new(BlockRng64::new(source))))
     }
@@ -116,14 +122,17 @@ RngCore for ThreadLocalSeeder<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType> {
     }
 }
 
-/// Gets this thread's instance of [ThreadLocalSeeder] backed by the shared default instance of [SharedBufferRng].
+/// Gets this thread's instance of [ThreadLocalSeeder] backed by the shared static default instance of
+/// [SharedBufferRng].
 pub fn thread_seeder() -> ThreadLocalSeeder<8, 16, OsRng> {
     DEFAULT_FOR_THREAD.with(ThreadLocalSeeder::clone)
 }
 
 /// Creates a PRNG that's identical to [rand::thread_rng]() except that it uses [thread_seeder]() to combine reads from
 /// [OsRng] with those that other threads will need later, rather than having them contend for access to the system's
-/// entropy pool. Intended as a drop-in replacement for [rand::thread_rng]().
+/// entropy pool. Intended as a drop-in replacement for [rand::thread_rng](). Note that once this has been called, the
+/// seed-reading thread will run until it panics or the program exits, because the underlying buffer will be reachable
+/// from a static variable.
 pub fn thread_rng() -> ReseedingRng<ChaCha12Core, ThreadLocalSeeder<8, 16, OsRng>> {
     let mut reseeder = thread_seeder();
     let mut seed = <ChaCha12Core as SeedableRng>::Seed::default();
@@ -133,8 +142,8 @@ pub fn thread_rng() -> ReseedingRng<ChaCha12Core, ThreadLocalSeeder<8, 16, OsRng
 
 impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType: Rng + Send + Debug + 'static>
     SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType> {
-    /// Creates an RNG that will have a dedicated thread reading from [source] into a buffer that's shared with all
-    /// clones of this [SharedBufferRng], as long as it or a clone still exists.
+    /// Creates an RNG that will have a new dedicated thread reading from [source] into a new buffer that's shared with
+    /// all clones of this [SharedBufferRng].
     pub fn new(mut source: SourceType) -> Self {
         let (sender, receiver) = async_channel::bounded(SEEDS_CAPACITY);
         info!("Creating a SharedBufferRngInner for {:?}", source);
