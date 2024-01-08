@@ -41,7 +41,15 @@ impl <const N: usize, T> AsRef<[T]> for DefaultableAlignedArray<N, T> {
 
 /// An RNG that reads from a shared buffer, to which only one thread per buffer will read from a seed source. It will
 /// share the buffer with all of its clones. Once this and all clones have been dropped, the source-reading thread will
-/// detect this using a [std::sync::Weak] reference and terminate.
+/// detect this using a [std::sync::Weak] reference and terminate. Since this RNG is used to implement [BlockRngCore]
+/// for instances of [BlockRng64], it can produce seeds of any desired size, but a `[u64; [WORDS_PER_SEED]]` will be
+/// fastest.
+///
+/// # Type parameters
+/// * [WORDS_PER_SEED] is the seed size to optimize for.
+/// * [SEEDS_CAPACITY] is the maximum number of `[u64; [WORDS_PER_SEED]]` instances to keep in memory for future use.
+/// * [SourceType] is the type of the seed source; currently it's only used to ensure the [SharedBufferRng] implements
+///   [CryptoRng] if and only if the seed source does so.
 #[derive(Debug)]
 pub struct SharedBufferRng<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType> {
     // Needed to keep the weak sender reachable as long as the receiver is strongly reachable
@@ -70,8 +78,7 @@ static DEFAULT_ROOT: OnceLock<SharedBufferRngStd> = OnceLock::new();
 
 /// Wrapper around [SharedBufferRng] that can be cloned for each thread in a [thread_local!] static variable. All clones
 /// will use the same buffer and seed source, and only one thread will read from that seed source no matter how many
-/// clones exist. Since this RNG is used to implement [BlockRngCore] for instances of [BlockRng64], it can produce seeds
-/// of any desired size, but a `[u64; [WORDS_PER_SEED]]` will be fastest.
+/// clones exist.
 #[derive(Clone, Debug)]
 #[repr(transparent)]
 pub struct ThreadLocalSeeder<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType>
