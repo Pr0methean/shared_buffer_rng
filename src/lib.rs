@@ -1,5 +1,6 @@
-use std::{sync::Arc, thread::{yield_now}};
-use std::fmt::Debug;
+use std::sync::Arc;
+use core::fmt::Debug;
+use core::marker::PhantomData;
 use std::sync::OnceLock;
 use std::thread::Builder;
 use aligned::{A64, Aligned};
@@ -7,8 +8,10 @@ use async_channel::{Receiver, Sender};
 use log::{error, info};
 use rand::Rng;
 use rand::rngs::OsRng;
-use rand_core::{CryptoRng};
+use rand_core::{CryptoRng, Error, RngCore};
 use rand_core::block::{BlockRng64, BlockRngCore};
+use std::cell::{UnsafeCell};
+use std::rc::Rc;
 
 pub struct DefaultableAlignedArray<const N: usize, T>(Aligned<A64, [T; N]>);
 
@@ -30,35 +33,92 @@ impl <const N: usize, T> AsRef<[T]> for DefaultableAlignedArray<N, T> {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct SharedBufferRng<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize> {
+#[derive(Debug)]
+pub struct SharedBufferRng<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType> {
     // Needed to keep the weak sender reachable as long as the receiver is strongly reachable
     _sender: Arc<Sender<Aligned<A64, [u64; WORDS_PER_SEED]>>>,
-    receiver: Receiver<Aligned<A64, [u64; WORDS_PER_SEED]>>
+    receiver: Receiver<Aligned<A64, [u64; WORDS_PER_SEED]>>,
+    _source: PhantomData<SourceType>
 }
 
-pub type SharedBufferRngStd = SharedBufferRng<8, 16>;
-
-static DEFAULT_INSTANCE: OnceLock<SharedBufferRngStd> = OnceLock::new();
-
-impl Default for SharedBufferRngStd {
-    fn default() -> Self {
-        DEFAULT_INSTANCE.get_or_init(SharedBufferRng::new_master_rng).clone()
+// Can't derive Clone because that would only work for SourceType: Clone but we don't actually clone the source
+impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType> Clone
+for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType> {
+    fn clone(&self) -> Self {
+        SharedBufferRng {
+            _sender: self._sender.clone(),
+            receiver: self.receiver.clone(),
+            _source: self._source
+        }
     }
+}
+
+pub type SharedBufferRngStd = SharedBufferRng<8, 16, OsRng>;
+
+static DEFAULT_ROOT: OnceLock<SharedBufferRngStd> = OnceLock::new();
+
+#[derive(Clone, Debug)]
+pub struct ThreadLocalSeeder<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType>
+(Rc<UnsafeCell<BlockRng64<SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType>>>>);
+
+impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType>
+ThreadLocalSeeder<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType> {
+    fn new(source: SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType>) -> Self {
+        ThreadLocalSeeder(Rc::new(UnsafeCell::new(BlockRng64::new(source))))
+    }
+
+    fn get_mut(&self) -> &mut BlockRng64<SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType>> {
+        // SAFETY: Same as impl RngCore for ThreadRng: https://rust-random.github.io/rand/src/rand/rngs/thread.rs.html
+        unsafe {
+            self.0.get().as_mut().unwrap()
+        }
+    }
+}
+
+thread_local! {
+    static DEFAULT_FOR_THREAD: ThreadLocalSeeder<8, 16, OsRng>
+        = ThreadLocalSeeder::new(DEFAULT_ROOT.get_or_init(|| SharedBufferRngStd::new(OsRng::default())).clone());
+}
+
+
+impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType>
+RngCore for ThreadLocalSeeder<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType> {
+    fn next_u32(&mut self) -> u32 {
+        self.get_mut().next_u32()
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.get_mut().next_u64()
+    }
+
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        self.get_mut().fill_bytes(dest)
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Error> {
+        self.get_mut().try_fill_bytes(dest)
+    }
+}
+
+pub fn thread_seeder() -> ThreadLocalSeeder<8, 16, OsRng> {
+    DEFAULT_FOR_THREAD.with(ThreadLocalSeeder::clone)
 }
 
 impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize>
-SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY> {
-    pub fn new_master_rng<T: Rng + Send + Debug + 'static>() -> BlockRng64<Self> {
+SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, OsRng> {
+    pub fn new_master_rng() -> BlockRng64<Self> {
         BlockRng64::new(Self::new(OsRng::default()))
     }
+}
 
-    pub fn new<T: Rng + Send + Debug + 'static>(mut inner_inner: T) -> Self {
+impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType: Rng + Send + Debug + 'static>
+    SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType> {
+    pub fn new(mut source: SourceType) -> Self {
         let (sender, receiver) = async_channel::bounded(SEEDS_CAPACITY);
-        info!("Creating a SharedBufferRngInner for {:?}", inner_inner);
+        info!("Creating a SharedBufferRngInner for {:?}", source);
         let inner = receiver.clone();
         let weak_sender = sender.clone().downgrade();
-        Builder::new().name(format!("Load seed from {:?} into shared buffer", inner_inner)).spawn(move || {
+        Builder::new().name(format!("Load seed from {:?} into shared buffer", source)).spawn(move || {
             let mut seed_from_source = Aligned([0; WORDS_PER_SEED]);
             'outer: loop {
                 match weak_sender.upgrade() {
@@ -68,7 +128,7 @@ SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY> {
                     },
                     Some(sender) => {
                         seed_from_source.iter_mut().for_each(
-                                |word| *word = inner_inner.next_u64());
+                                |word| *word = source.next_u64());
                         loop {
                             let result = sender.send_blocking(seed_from_source);
                             if result.is_ok() {
@@ -88,18 +148,16 @@ SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY> {
                 }
             }
         }).unwrap();
-        while receiver.is_empty() {
-            yield_now();
-        }
         SharedBufferRng {
             receiver: inner,
-            _sender: sender.into()
+            _sender: sender.into(),
+            _source: PhantomData::default()
         }
     }
 }
 
-impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize> BlockRngCore
-for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY> {
+impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType> BlockRngCore
+for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType> {
     type Item = u64;
     type Results = DefaultableAlignedArray<WORDS_PER_SEED, u64>;
 
@@ -114,7 +172,8 @@ for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY> {
     }
 }
 
-impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize> CryptoRng for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY> {}
+impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, T: CryptoRng> CryptoRng
+for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, T> {}
 
 #[cfg(test)]
 mod tests {
@@ -164,7 +223,7 @@ mod tests {
         WORDS.get_or_init(Bag::new);
         const THREADS: usize = 2;
         const ITERS_PER_THREAD: usize = 1;
-        let seeder: SharedBufferRng<8,4> = SharedBufferRng::new(BlockRng64::new(
+        let seeder: SharedBufferRng<8,4,_> = SharedBufferRng::new(BlockRng64::new(
             ByteValuesInOrderRng { words_written: AtomicUsize::new(0)}));
         let ths: Vec<_> = (0..THREADS)
             .map(|_| {
