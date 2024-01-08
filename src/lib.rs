@@ -1,5 +1,6 @@
 use std::{sync::Arc, thread::{yield_now}};
 use std::fmt::Debug;
+use std::sync::OnceLock;
 use std::thread::Builder;
 use aligned::{A64, Aligned};
 use async_channel::{Receiver, Sender};
@@ -37,6 +38,14 @@ pub struct SharedBufferRng<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: us
 }
 
 pub type SharedBufferRngStd = SharedBufferRng<8, 16>;
+
+static DEFAULT_INSTANCE: OnceLock<SharedBufferRngStd> = OnceLock::new();
+
+impl Default for SharedBufferRngStd {
+    fn default() -> Self {
+        DEFAULT_INSTANCE.get_or_init(SharedBufferRng::new_master_rng).clone()
+    }
+}
 
 impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize>
 SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY> {
