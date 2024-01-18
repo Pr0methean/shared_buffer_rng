@@ -3,7 +3,7 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use rand::rngs::adapter::ReseedingRng;
 use rand_chacha::ChaCha12Core;
 use rand_core::{OsRng, RngCore, SeedableRng};
-use shared_buffer_rng::{rng_from_default_buffer, SharedBufferRng, WORDS_PER_STD_RNG};
+use shared_buffer_rng::{SharedBufferRng, WORDS_PER_STD_RNG};
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::SeqCst;
 use std::thread::spawn;
@@ -55,7 +55,7 @@ macro_rules! benchmark_contended {
         let cpus = num_cpus::get();
         benchmark_contended!($group, $n, cpus - 1);
         benchmark_contended!($group, $n, cpus);
-    }
+    };
 
     ($group:expr, $n:expr, $threads:expr) => {
         let root = BenchmarkSharedBufferRng::<$n>::new(OsRng::default());
@@ -70,7 +70,7 @@ macro_rules! benchmark_contended {
             })
             .collect();
         drop(root);
-        let mut reseeding_from_shared = rng_from_default_buffer(RESEEDING_THRESHOLD);
+        let mut reseeding_from_shared = root.new_standard_rng(RESEEDING_THRESHOLD);
         $group.bench_function(BenchmarkId::new("With SharedBufferRngStd", format!("{:02} threads, buffer size {:04}", $threads, $n)), |b| {
             b.iter(|| black_box(reseeding_from_shared.next_u64()))
         });
