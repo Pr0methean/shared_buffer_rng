@@ -11,6 +11,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - name: Install gnuplot
+        run: |
+          sudo apt-get update
+          sudo apt install gnuplot
       - name: Restore Rust cache
         uses: actions/cache/restore@v3
         with:
