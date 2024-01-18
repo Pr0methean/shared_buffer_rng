@@ -7,6 +7,7 @@ use shared_buffer_rng::{SharedBufferRng, WORDS_PER_STD_RNG};
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::SeqCst;
 use std::thread::spawn;
+use std::time::Duration;
 
 const RESEEDING_THRESHOLD: u64 = 1024;
 
@@ -133,7 +134,7 @@ fn benchmark_contended(c: &mut Criterion) {
 
 criterion_group! {
     name = benches;
-    config = Criterion::default().confidence_level(0.99).sample_size(2048).;
+    config = Criterion::default().confidence_level(0.99).sample_size(2048).warm_up_time(Duration::from_secs(10));
     targets = benchmark_single_thread, benchmark_contended
 }
 criterion_main!(benches);
