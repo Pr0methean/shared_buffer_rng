@@ -1,17 +1,19 @@
-use std::sync::Arc;
+#![feature(generic_const_exprs)]
+
+use std::sync::{Arc, Mutex};
 use core::fmt::Debug;
 use core::marker::PhantomData;
+use core::mem::size_of;
 use std::sync::OnceLock;
 use std::thread::Builder;
 use aligned::{A64, Aligned};
-use async_channel::{Receiver, Sender};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use bytemuck::{cast_mut, Pod, Zeroable};
 use log::{error, info};
 use rand::Rng;
 use rand::rngs::{OsRng};
-use rand_core::{CryptoRng, Error, RngCore, SeedableRng};
+use rand_core::{CryptoRng, RngCore, SeedableRng};
 use rand_core::block::{BlockRng64, BlockRngCore};
-use std::cell::{UnsafeCell};
-use std::rc::Rc;
 use rand::rngs::adapter::ReseedingRng;
 use rand_chacha::ChaCha12Core;
 
@@ -19,6 +21,7 @@ use rand_chacha::ChaCha12Core;
 // cache line, which would prevent &mut A from being used concurrently with &B or &mut B because only one CPU core can
 // have a given cache line in the modified state). All modern x86, ARM, x86-64 and Aarch64 CPUs have 64-byte cache
 // lines. TODO: Find a future-proof way to choose the right alignment for obscure architectures.
+#[derive(Copy, Clone)]
 pub struct DefaultableAlignedArray<const N: usize, T>(Aligned<A64, [T; N]>);
 
 impl <const N: usize, T: Default + Copy> Default for DefaultableAlignedArray<N, T> {
@@ -27,17 +30,33 @@ impl <const N: usize, T: Default + Copy> Default for DefaultableAlignedArray<N, 
     }
 }
 
+impl <const N: usize, T> AsMut<[T; N]> for DefaultableAlignedArray<N, T> {
+    fn as_mut(&mut self) -> &mut [T; N] {
+        &mut self.0
+    }
+}
+
 impl <const N: usize, T> AsMut<[T]> for DefaultableAlignedArray<N, T> {
     fn as_mut(&mut self) -> &mut [T] {
-        self.0.as_mut()
+        self.0.as_mut_slice()
+    }
+}
+
+impl <const N: usize, T> AsRef<[T; N]> for DefaultableAlignedArray<N, T> {
+    fn as_ref(&self) -> &[T; N] {
+        &self.0
     }
 }
 
 impl <const N: usize, T> AsRef<[T]> for DefaultableAlignedArray<N, T> {
     fn as_ref(&self) -> &[T] {
-        self.0.as_ref()
+        self.0.as_slice()
     }
 }
+
+unsafe impl<const N: usize, T: Zeroable> Zeroable for DefaultableAlignedArray<N, T> {}
+
+unsafe impl <const N: usize, T: Pod> Pod for DefaultableAlignedArray<N, T> {}
 
 /// An RNG that reads from a shared buffer, to which only one thread per buffer will read from a seed source. It will
 /// share the buffer with all of its clones. Once this and all clones have been dropped, the source-reading thread will
@@ -53,8 +72,8 @@ impl <const N: usize, T> AsRef<[T]> for DefaultableAlignedArray<N, T> {
 #[derive(Debug)]
 pub struct SharedBufferRng<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType> {
     // Needed to keep the weak sender reachable as long as the receiver is strongly reachable
-    _sender: Arc<Sender<Aligned<A64, [u64; WORDS_PER_SEED]>>>,
-    receiver: Receiver<Aligned<A64, [u64; WORDS_PER_SEED]>>,
+    _sender: Arc<SyncSender<DefaultableAlignedArray<WORDS_PER_SEED, u64>>>,
+    receiver: Arc<Mutex<Receiver<DefaultableAlignedArray<WORDS_PER_SEED, u64>>>>,
     // Used to determine whether to implement CryptoRng
     _source: PhantomData<SourceType>
 }
@@ -72,92 +91,68 @@ for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType> {
     }
 }
 
-pub type SharedBufferRngStd = SharedBufferRng<8, 16, OsRng>;
+impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType>
+SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType> {
+    pub fn new_seeder(&self) -> BlockRng64<Self> {
+        BlockRng64::new(self.clone())
+    }
+
+    pub fn new_standard_rng(&self, reseeding_threshold: u64)
+            -> ReseedingRng<ChaCha12Core, BlockRng64<SharedBufferRngStd>> {
+        let mut reseeder = seeder_from_default_buffer();
+        let mut seed = <ChaCha12Core as SeedableRng>::Seed::default();
+        reseeder.fill_bytes(&mut seed);
+        ReseedingRng::new(ChaCha12Core::from_seed(seed), reseeding_threshold, reseeder)
+    }
+
+    pub fn new_default_rng(&self) -> ReseedingRng<ChaCha12Core, BlockRng64<SharedBufferRngStd>> {
+        self.new_standard_rng(1 << 16)
+    }
+}
+
+const WORDS_PER_STD_RNG: usize = 4;
+const SEEDS_PER_STD_BUFFER: usize = 128;
+
+pub type SharedBufferRngStd = SharedBufferRng<WORDS_PER_STD_RNG, SEEDS_PER_STD_BUFFER, OsRng>;
+
+pub type ReseedingRngStd = ReseedingRng<ChaCha12Core, BlockRng64<SharedBufferRngStd>>;
 
 static DEFAULT_ROOT: OnceLock<SharedBufferRngStd> = OnceLock::new();
 
-/// Wrapper around [SharedBufferRng] that can be cloned for each thread in a [thread_local!] static variable. All clones
-/// will use the same buffer and seed source, and only one thread will read from that seed source no matter how many
-/// clones exist.
-#[derive(Clone, Debug)]
-#[repr(transparent)]
-pub struct ThreadLocalSeeder<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType>
-(Rc<UnsafeCell<BlockRng64<SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType>>>>);
-
-impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType>
-From<SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType>>
-for ThreadLocalSeeder<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType> {
-    /// Note that this [ThreadLocalSeeder] prevents its source from being dropped and its reader thread from being
-    /// dropped, even when its clones on the threads consuming seeds have all been dropped.
-    fn from(source: SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType>) -> Self {
-        ThreadLocalSeeder(Rc::new(UnsafeCell::new(BlockRng64::new(source))))
-    }
+fn get_default_root() -> &'static SharedBufferRngStd {
+    DEFAULT_ROOT.get_or_init(|| SharedBufferRngStd::new(OsRng::default()))
 }
 
-impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType>
-ThreadLocalSeeder<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType> {
-    fn get_mut(&self) -> &mut BlockRng64<SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType>> {
-        // SAFETY: Same as impl RngCore for ThreadRng: https://rust-random.github.io/rand/src/rand/rngs/thread.rs.html
-        unsafe {
-            self.0.get().as_mut().unwrap()
-        }
-    }
+/// Gets a seed generator backed by the default instance of [SharedBufferRng].
+pub fn seeder_from_default_buffer() -> BlockRng64<SharedBufferRngStd> {
+    get_default_root().new_seeder()
 }
 
-thread_local! {
-    static DEFAULT_FOR_THREAD: ThreadLocalSeeder<8, 16, OsRng>
-        = ThreadLocalSeeder::from(DEFAULT_ROOT.get_or_init(|| SharedBufferRngStd::new(OsRng::default())).clone());
+/// Creates a PRNG that's identical to [rand::thread_rng]() except that it uses the default instance of
+/// [SharedBufferRng]. Intended as a drop-in replacement for [rand::thread_rng](). Note that once this has been called,
+/// the seed-reading thread will run until it panics or the program exits, because the underlying buffer will be
+/// reachable from a static variable.
+pub fn rng_from_default_buffer(reseeding_threshold: u64) -> ReseedingRngStd {
+    get_default_root().new_standard_rng(reseeding_threshold)
 }
 
-
-impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType>
-RngCore for ThreadLocalSeeder<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType> {
-    fn next_u32(&mut self) -> u32 {
-        self.get_mut().next_u32()
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.get_mut().next_u64()
-    }
-
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        self.get_mut().fill_bytes(dest)
-    }
-
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Error> {
-        self.get_mut().try_fill_bytes(dest)
-    }
-}
-
-/// Gets this thread's instance of [ThreadLocalSeeder] backed by the shared static default instance of
-/// [SharedBufferRng].
-pub fn thread_seeder() -> ThreadLocalSeeder<8, 16, OsRng> {
-    DEFAULT_FOR_THREAD.with(ThreadLocalSeeder::clone)
-}
-
-/// Creates a PRNG that's identical to [rand::thread_rng]() except that it uses [thread_seeder]() to combine reads from
-/// [OsRng] with those that other threads will need later, rather than having them contend for access to the system's
-/// entropy pool. Intended as a drop-in replacement for [rand::thread_rng](). Note that once this has been called, the
-/// seed-reading thread will run until it panics or the program exits, because the underlying buffer will be reachable
-/// from a static variable.
-pub fn thread_rng() -> ReseedingRng<ChaCha12Core, ThreadLocalSeeder<8, 16, OsRng>> {
-    let mut reseeder = thread_seeder();
-    let mut seed = <ChaCha12Core as SeedableRng>::Seed::default();
-    reseeder.fill_bytes(&mut seed);
-    ReseedingRng::new(ChaCha12Core::from_seed(seed), 1 << 16, reseeder)
+pub fn default_rng() -> ReseedingRngStd {
+    get_default_root().new_default_rng()
 }
 
 impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType: Rng + Send + Debug + 'static>
-    SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType> {
+    SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType>
+    where [u8; WORDS_PER_SEED * size_of::<u64>()]: Pod, [u64; WORDS_PER_SEED]: Pod {
     /// Creates an RNG that will have a new dedicated thread reading from [source] into a new buffer that's shared with
     /// all clones of this [SharedBufferRng].
     pub fn new(mut source: SourceType) -> Self {
-        let (sender, receiver) = async_channel::bounded(SEEDS_CAPACITY);
+        let (sender, receiver)
+            = sync_channel(SEEDS_CAPACITY);
+        let sender = Arc::new(sender);
         info!("Creating a SharedBufferRngInner for {:?}", source);
-        let inner = receiver.clone();
-        let weak_sender = sender.clone().downgrade();
+        let weak_sender = Arc::downgrade(&sender);
         Builder::new().name(format!("Load seed from {:?} into shared buffer", source)).spawn(move || {
-            let mut seed_from_source = Aligned([0; WORDS_PER_SEED]);
+            let mut seed_from_source = DefaultableAlignedArray::<WORDS_PER_SEED, u64>::default();
             'outer: loop {
                 match weak_sender.upgrade() {
                     None => {
@@ -165,10 +160,10 @@ impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType: Rng 
                         return
                     },
                     Some(sender) => {
-                        seed_from_source.iter_mut().for_each(
-                                |word| *word = source.next_u64());
+                        let bytes: &mut [u8; WORDS_PER_SEED * size_of::<u64>()] = cast_mut::<[u64; WORDS_PER_SEED], [u8; WORDS_PER_SEED * size_of::<u64>()]>(seed_from_source.as_mut());
+                        source.fill_bytes(bytes);
                         loop {
-                            let result = sender.send_blocking(seed_from_source);
+                            let result = (&*sender).send(seed_from_source);
                             if result.is_ok() {
                                 continue 'outer;
                             } else {
@@ -178,7 +173,6 @@ impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType: Rng 
                                 } else {
                                     error!("Error writing to shared buffer: {:?}", result);
                                 }
-                                sender.close();
                                 return;
                             }
                         }
@@ -187,7 +181,7 @@ impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType: Rng 
             }
         }).unwrap();
         SharedBufferRng {
-            receiver: inner,
+            receiver: Arc::new(Mutex::new(receiver)),
             _sender: sender.into(),
             _source: PhantomData::default()
         }
@@ -200,12 +194,12 @@ for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType> {
     type Results = DefaultableAlignedArray<WORDS_PER_SEED, u64>;
 
     fn generate(&mut self, results: &mut Self::Results) {
-        match self.receiver.recv_blocking() {
+        match self.receiver.lock().unwrap().recv() {
             Ok(seed) => {
-                *results.0 = *seed;
+                *results = seed;
                 return;
             },
-            Err(e) => panic!("Error from recv_blocking(): {}", e)
+            Err(e) => panic!("Error from recv(): {}", e)
         }
     }
 }
