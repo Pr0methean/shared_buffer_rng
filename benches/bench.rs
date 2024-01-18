@@ -26,6 +26,7 @@ macro_rules! single_thread_bench {
 fn benchmark_single_thread(c: &mut Criterion) {
     let mut group = c.benchmark_group("Single Thread");
     group.throughput(Throughput::Bytes(size_of::<u64>() as u64));
+    single_thread_bench!(group, 0);
     single_thread_bench!(group, 1);
     single_thread_bench!(group, 2);
     single_thread_bench!(group, 4);
@@ -85,6 +86,7 @@ macro_rules! benchmark_contended {
 fn benchmark_contended(c: &mut Criterion) {
     let mut group = c.benchmark_group("Contended");
     group.throughput(Throughput::Bytes(size_of::<u64>() as u64));
+    benchmark_contended!(group, 0);
     benchmark_contended!(group, 1);
     benchmark_contended!(group, 2);
     benchmark_contended!(group, 4);
