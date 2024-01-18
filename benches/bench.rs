@@ -69,8 +69,8 @@ macro_rules! benchmark_contended {
                 })
             })
             .collect();
-        drop(root);
         let mut reseeding_from_shared = root.new_standard_rng(RESEEDING_THRESHOLD);
+        drop(root);
         $group.bench_function(BenchmarkId::new("With SharedBufferRngStd", format!("{:02} threads, buffer size {:04}", $threads, $n)), |b| {
             b.iter(|| black_box(reseeding_from_shared.next_u64()))
         });
