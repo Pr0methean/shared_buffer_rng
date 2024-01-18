@@ -1,0 +1,58 @@
+name: Rust
+
+on:
+  push:
+    branches: [ "main" ]
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Restore Rust cache
+        uses: actions/cache/restore@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            Cargo.lock
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.toml', 'src/**/*.rs', 'benches/**/*.rs', '.github/workflows/rust.yml') }}
+      - name: Install nightly Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          override: true
+      - name: Unit Tests
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          toolchain: nightly
+      - name: Build Benchmarks
+        uses: actions-rs/cargo@v1
+        with:
+          command: build --benches
+          toolchain: nightly
+      - name: Save Rust cache
+        uses: actions/cache/save@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            Cargo.lock
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.toml', 'src/**/*.rs', 'benches/**/*.rs', '.github/workflows/rust.yml') }}
+      - name: Run benchmarks
+        uses: actions-rs/cargo@v1
+        with:
+          command: bench
+          toolchain: nightly
+      - name: Upload benchmark reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: Optimization remarks
+          path: target/criterion/report
+          if-no-files-found: error

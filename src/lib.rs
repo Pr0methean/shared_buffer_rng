@@ -1,3 +1,4 @@
+#![allow(incomplete_features)]
 #![feature(generic_const_exprs)]
 
 use aligned::{Aligned, A64};
@@ -21,6 +22,7 @@ use std::thread::Builder;
 // have a given cache line in the modified state). All modern x86, ARM, x86-64 and Aarch64 CPUs have 64-byte cache
 // lines. TODO: Find a future-proof way to choose the right alignment for obscure architectures.
 #[derive(Copy, Clone)]
+#[repr(transparent)] // may be necessary to make Bytemuck transmutation safe
 pub struct DefaultableAlignedArray<const N: usize, T>(Aligned<A64, [T; N]>);
 
 impl<const N: usize, T: Default + Copy> Default for DefaultableAlignedArray<N, T> {
@@ -110,8 +112,8 @@ impl<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType>
     }
 }
 
-const WORDS_PER_STD_RNG: usize = 4;
-const SEEDS_PER_STD_BUFFER: usize = 128;
+pub const WORDS_PER_STD_RNG: usize = 4;
+pub const SEEDS_PER_STD_BUFFER: usize = 128;
 
 pub type SharedBufferRngStd = SharedBufferRng<WORDS_PER_STD_RNG, SEEDS_PER_STD_BUFFER, OsRng>;
 

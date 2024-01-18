@@ -1,24 +1,42 @@
 use core::mem::size_of;
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rand::rngs::adapter::ReseedingRng;
 use rand_chacha::ChaCha12Core;
 use rand_core::{OsRng, RngCore, SeedableRng};
-use shared_buffer_rng::{rng_from_default_buffer, SharedBufferRngStd};
+use shared_buffer_rng::{rng_from_default_buffer, SharedBufferRng, WORDS_PER_STD_RNG};
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::SeqCst;
 use std::thread::spawn;
 
 const RESEEDING_THRESHOLD: u64 = 1024;
 
+type BenchmarkSharedBufferRng<const N: usize> = SharedBufferRng<WORDS_PER_STD_RNG, N, OsRng>;
+
+macro_rules! single_thread_bench {
+    ($group:expr, $n:expr) => {
+        let mut reseeding_from_shared =
+            BenchmarkSharedBufferRng::<$n>::new(OsRng::default()).new_standard_rng(RESEEDING_THRESHOLD);
+        $group.bench_function(BenchmarkId::new("With SharedBufferRngStd", format!("buffer size {:04}", $n)), |b| {
+            b.iter(|| black_box(reseeding_from_shared.next_u64()))
+        });
+        drop(reseeding_from_shared);
+    };
+}
+
 fn benchmark_single_thread(c: &mut Criterion) {
     let mut group = c.benchmark_group("Single Thread");
     group.throughput(Throughput::Bytes(size_of::<u64>() as u64));
-    let mut reseeding_from_shared =
-        SharedBufferRngStd::new(OsRng::default()).new_standard_rng(RESEEDING_THRESHOLD);
-    group.bench_function("With SharedBufferRngStd", |b| {
-        b.iter(|| black_box(reseeding_from_shared.next_u64()))
-    });
-    drop(reseeding_from_shared);
+    single_thread_bench!(group, 1);
+    single_thread_bench!(group, 2);
+    single_thread_bench!(group, 4);
+    single_thread_bench!(group, 8);
+    single_thread_bench!(group, 16);
+    single_thread_bench!(group, 32);
+    single_thread_bench!(group, 64);
+    single_thread_bench!(group, 128);
+    single_thread_bench!(group, 256);
+    single_thread_bench!(group, 512);
+    single_thread_bench!(group, 1024);
     let mut reseeding_from_os = ReseedingRng::new(
         ChaCha12Core::from_rng(OsRng::default()).unwrap(),
         RESEEDING_THRESHOLD,
@@ -32,30 +50,52 @@ fn benchmark_single_thread(c: &mut Criterion) {
 
 static FINISHED: AtomicBool = AtomicBool::new(false);
 
+macro_rules! benchmark_contended {
+    ($group:expr, $n:expr) => {
+        let cpus = num_cpus::get();
+        benchmark_contended!($group, $n, cpus - 1);
+        benchmark_contended!($group, $n, cpus);
+    }
+
+    ($group:expr, $n:expr, $threads:expr) => {
+        let root = BenchmarkSharedBufferRng::<$n>::new(OsRng::default());
+        let background_threads: Vec<_> = (0..($threads - 1))
+            .map(|_| {
+                let mut rng = root.new_standard_rng(RESEEDING_THRESHOLD);
+                spawn(move || {
+                    while !FINISHED.load(SeqCst) {
+                        black_box(rng.next_u64());
+                    }
+                })
+            })
+            .collect();
+        drop(root);
+        let mut reseeding_from_shared = rng_from_default_buffer(RESEEDING_THRESHOLD);
+        $group.bench_function(BenchmarkId::new("With SharedBufferRngStd", format!("{:02} threads, buffer size {:04}", $threads, $n)), |b| {
+            b.iter(|| black_box(reseeding_from_shared.next_u64()))
+        });
+        FINISHED.store(true, SeqCst);
+        background_threads
+            .into_iter()
+            .for_each(|handle| handle.join().unwrap());
+        FINISHED.store(false, SeqCst);
+    };
+}
+
 fn benchmark_contended(c: &mut Criterion) {
-    let root = SharedBufferRngStd::new(OsRng::default());
     let mut group = c.benchmark_group("Contended");
     group.throughput(Throughput::Bytes(size_of::<u64>() as u64));
-    let background_threads: Vec<_> = (0..(num_cpus::get() - 1))
-        .map(|_| {
-            let mut rng = root.new_standard_rng(RESEEDING_THRESHOLD);
-            spawn(move || {
-                while !FINISHED.load(SeqCst) {
-                    black_box(rng.next_u64());
-                }
-            })
-        })
-        .collect();
-    drop(root);
-    let mut reseeding_from_shared = rng_from_default_buffer(RESEEDING_THRESHOLD);
-    group.bench_function("With SharedBufferRngStd", |b| {
-        b.iter(|| black_box(reseeding_from_shared.next_u64()))
-    });
-    FINISHED.store(true, SeqCst);
-    background_threads
-        .into_iter()
-        .for_each(|handle| handle.join().unwrap());
-    FINISHED.store(false, SeqCst);
+    benchmark_contended!(group, 1);
+    benchmark_contended!(group, 2);
+    benchmark_contended!(group, 4);
+    benchmark_contended!(group, 8);
+    benchmark_contended!(group, 16);
+    benchmark_contended!(group, 32);
+    benchmark_contended!(group, 64);
+    benchmark_contended!(group, 128);
+    benchmark_contended!(group, 256);
+    benchmark_contended!(group, 512);
+    benchmark_contended!(group, 1024);
     let background_threads: Vec<_> = (0..(num_cpus::get() - 1))
         .map(|_| {
             let mut rng = ReseedingRng::new(
@@ -87,7 +127,7 @@ fn benchmark_contended(c: &mut Criterion) {
 
 criterion_group! {
     name = benches;
-    config = Criterion::default().confidence_level(0.99).sample_size(1000);
+    config = Criterion::default().confidence_level(0.99).sample_size(2048);
     targets = benchmark_single_thread, benchmark_contended
 }
 criterion_main!(benches);
