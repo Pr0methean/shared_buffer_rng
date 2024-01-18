@@ -1,5 +1,5 @@
 use core::mem::size_of;
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput, PlotConfiguration, AxisScale};
+use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use rand::rngs::adapter::ReseedingRng;
 use rand_chacha::ChaCha12Core;
 use rand_core::{OsRng, RngCore, SeedableRng};
@@ -7,7 +7,6 @@ use shared_buffer_rng::{SharedBufferRng, WORDS_PER_STD_RNG};
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::SeqCst;
 use std::thread::spawn;
-use std::time::Duration;
 
 const RESEEDING_THRESHOLD: u64 = 1024;
 
@@ -26,7 +25,6 @@ macro_rules! single_thread_bench {
 fn benchmark_single_thread(c: &mut Criterion) {
     let mut group = c.benchmark_group("Single Thread");
     group.throughput(Throughput::Bytes(size_of::<u64>() as u64));
-    group.plot_config(PlotConfiguration::default().summary_scale(AxisScale::Logarithmic));
     single_thread_bench!(group, 0);
     single_thread_bench!(group, 1);
     single_thread_bench!(group, 2);
@@ -88,7 +86,6 @@ macro_rules! benchmark_contended {
 fn benchmark_contended(c: &mut Criterion) {
     let mut group = c.benchmark_group("Contended");
     group.throughput(Throughput::Bytes(size_of::<u64>() as u64));
-    group.plot_config(PlotConfiguration::default().summary_scale(AxisScale::Logarithmic));
     benchmark_contended!(group, 0);
     benchmark_contended!(group, 1);
     benchmark_contended!(group, 2);
@@ -135,7 +132,7 @@ fn benchmark_contended(c: &mut Criterion) {
 
 criterion_group! {
     name = benches;
-    config = Criterion::default().confidence_level(0.99).sample_size(4096).warm_up_time(Duration::from_secs(10));
+    config = Criterion::default().confidence_level(0.99).sample_size(4096);
     targets = benchmark_single_thread, benchmark_contended
 }
 criterion_main!(benches);
