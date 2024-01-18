@@ -1,14 +1,28 @@
 use core::mem::size_of;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rand::rngs::adapter::ReseedingRng;
-use rand_chacha::ChaCha12Core;
+use rand_chacha::{ChaCha12Core};
 use rand_core::{OsRng, RngCore, SeedableRng};
-use shared_buffer_rng::{SharedBufferRng, WORDS_PER_STD_RNG};
+use shared_buffer_rng::{DefaultableAlignedArray, SharedBufferRng, WORDS_PER_STD_RNG};
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::SeqCst;
 use std::thread::spawn;
+use bytemuck::cast_slice_mut;
+use rand::Rng;
+use rand_core::block::{BlockRng64, BlockRngCore};
 
 const RESEEDING_THRESHOLD: u64 = 1024;
+
+struct RngBufferCore<const N: usize, T: Rng>(T);
+
+impl <const N: usize, T: Rng> BlockRngCore for RngBufferCore<N, T> {
+    type Item = u64;
+    type Results = DefaultableAlignedArray<N, u64>;
+
+    fn generate(&mut self, results: &mut Self::Results) {
+        self.0.fill_bytes(cast_slice_mut(results.as_mut()));
+    }
+}
 
 type BenchmarkSharedBufferRng<const N: usize> = SharedBufferRng<WORDS_PER_STD_RNG, N, OsRng>;
 
@@ -19,6 +33,12 @@ macro_rules! single_thread_bench {
         $group.bench_with_input(BenchmarkId::new("SharedBufferRng", $n),
         &$n, |b, _| b.iter(|| black_box(reseeding_from_shared.next_u64())));
         drop(reseeding_from_shared);
+        let mut buffer = BlockRng64::new(RngBufferCore::<$n, OsRng>(OsRng::default()));
+        let mut seed = [0u8; 32];
+        buffer.fill_bytes(&mut seed);
+        let mut reseeding_from_buffer = ReseedingRng::new(ChaCha12Core::from_seed(seed), RESEEDING_THRESHOLD, buffer);
+        $group.bench_with_input(BenchmarkId::new("RngBufferCore", $n),
+        &$n, |b, _| b.iter(|| black_box(reseeding_from_buffer.next_u64())));
     };
 }
 
@@ -75,6 +95,34 @@ macro_rules! benchmark_contended {
         drop(root);
         $group.bench_with_input(BenchmarkId::new(format!("SharedBufferRng, {:02} threads", $threads), $n),
             &$n, |b, _| b.iter(|| black_box(reseeding_from_shared.next_u64())));
+        FINISHED.store(true, SeqCst);
+        background_threads
+            .into_iter()
+            .for_each(|handle| handle.join().unwrap());
+        FINISHED.store(false, SeqCst);
+        let rngs: Vec<_> = (0..($threads - 1))
+            .map(|_| {
+                let mut buffer = BlockRng64::new(RngBufferCore::<$n, OsRng>(OsRng::default()));
+                let mut seed = [0u8; 32];
+                buffer.fill_bytes(&mut seed);
+                ReseedingRng::new(ChaCha12Core::from_seed(seed), RESEEDING_THRESHOLD, buffer)
+            })
+            .collect();
+        let background_threads: Vec<_> = rngs.into_iter()
+            .map(|mut rng| {
+                spawn(move || {
+                    while !FINISHED.load(SeqCst) {
+                        black_box(rng.next_u64());
+                    }
+                })
+            })
+            .collect();
+        let mut buffer = BlockRng64::new(RngBufferCore::<$n, OsRng>(OsRng::default()));
+        let mut seed = [0u8; 32];
+        buffer.fill_bytes(&mut seed);
+        let mut reseeding_from_buffer = ReseedingRng::new(ChaCha12Core::from_seed(seed), RESEEDING_THRESHOLD, buffer);
+        $group.bench_with_input(BenchmarkId::new(format!("RngBufferCore, {:02} threads", $threads), $n),
+        &$n, |b, _| b.iter(|| black_box(reseeding_from_buffer.next_u64())));
         FINISHED.store(true, SeqCst);
         background_threads
             .into_iter()
