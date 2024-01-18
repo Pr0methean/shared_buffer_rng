@@ -15,6 +15,7 @@ fn benchmark_single_thread(c: &mut Criterion) {
     group.throughput(Throughput::Bytes(size_of::<u64>() as u64));
     let mut reseeding_from_shared = SharedBufferRngStd::new(OsRng::default()).new_standard_rng(RESEEDING_THRESHOLD);
     group.bench_function("With SharedBufferRngStd", |b| b.iter(|| black_box(reseeding_from_shared.next_u64())));
+    drop(reseeding_from_shared);
     let mut reseeding_from_os = ReseedingRng::new(ChaCha12Core::from_rng(OsRng::default()).unwrap(),
                                                   RESEEDING_THRESHOLD, OsRng::default());
     group.bench_function("With OsRng", |b| b.iter(|| black_box(reseeding_from_os.next_u64())));

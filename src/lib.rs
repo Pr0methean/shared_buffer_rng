@@ -1,15 +1,14 @@
 #![feature(generic_const_exprs)]
 
-use std::sync::{Arc, Mutex};
 use core::fmt::Debug;
 use core::marker::PhantomData;
 use core::mem::size_of;
 use std::sync::OnceLock;
 use std::thread::Builder;
 use aligned::{A64, Aligned};
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
-use bytemuck::{cast_mut, Pod, Zeroable};
-use log::{error, info};
+use crossbeam_channel::{Receiver, bounded};
+use bytemuck::{AnyBitPattern, cast_mut, Pod, Zeroable};
+use log::{info};
 use rand::Rng;
 use rand::rngs::{OsRng};
 use rand_core::{CryptoRng, RngCore, SeedableRng};
@@ -56,7 +55,7 @@ impl <const N: usize, T> AsRef<[T]> for DefaultableAlignedArray<N, T> {
 
 unsafe impl<const N: usize, T: Zeroable> Zeroable for DefaultableAlignedArray<N, T> {}
 
-unsafe impl <const N: usize, T: Pod> Pod for DefaultableAlignedArray<N, T> {}
+unsafe impl <const N: usize, T: AnyBitPattern> AnyBitPattern for DefaultableAlignedArray<N, T> {}
 
 /// An RNG that reads from a shared buffer, to which only one thread per buffer will read from a seed source. It will
 /// share the buffer with all of its clones. Once this and all clones have been dropped, the source-reading thread will
@@ -71,9 +70,7 @@ unsafe impl <const N: usize, T: Pod> Pod for DefaultableAlignedArray<N, T> {}
 ///   [CryptoRng] if and only if the seed source does so.
 #[derive(Debug)]
 pub struct SharedBufferRng<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType> {
-    // Needed to keep the weak sender reachable as long as the receiver is strongly reachable
-    _sender: Arc<SyncSender<DefaultableAlignedArray<WORDS_PER_SEED, u64>>>,
-    receiver: Arc<Mutex<Receiver<DefaultableAlignedArray<WORDS_PER_SEED, u64>>>>,
+    receiver: Receiver<DefaultableAlignedArray<WORDS_PER_SEED, u64>>,
     // Used to determine whether to implement CryptoRng
     _source: PhantomData<SourceType>
 }
@@ -84,7 +81,6 @@ for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType> {
     /// Returns a new SharedBufferRng view on the same buffer.
     fn clone(&self) -> Self {
         SharedBufferRng {
-            _sender: self._sender.clone(),
             receiver: self.receiver.clone(),
             _source: self._source
         }
@@ -146,43 +142,22 @@ impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType: Rng 
     /// Creates an RNG that will have a new dedicated thread reading from [source] into a new buffer that's shared with
     /// all clones of this [SharedBufferRng].
     pub fn new(mut source: SourceType) -> Self {
-        let (sender, receiver)
-            = sync_channel(SEEDS_CAPACITY);
-        let sender = Arc::new(sender);
+        let (sender, receiver) = bounded(SEEDS_CAPACITY);
         info!("Creating a SharedBufferRngInner for {:?}", source);
-        let weak_sender = Arc::downgrade(&sender);
         Builder::new().name(format!("Load seed from {:?} into shared buffer", source)).spawn(move || {
             let mut seed_from_source = DefaultableAlignedArray::<WORDS_PER_SEED, u64>::default();
-            'outer: loop {
-                match weak_sender.upgrade() {
-                    None => {
-                        info!("Detected that a seed channel is no longer open for receiving");
-                        return
-                    },
-                    Some(sender) => {
-                        let bytes: &mut [u8; WORDS_PER_SEED * size_of::<u64>()] = cast_mut::<[u64; WORDS_PER_SEED], [u8; WORDS_PER_SEED * size_of::<u64>()]>(seed_from_source.as_mut());
-                        source.fill_bytes(bytes);
-                        loop {
-                            let result = (&*sender).send(seed_from_source);
-                            if result.is_ok() {
-                                continue 'outer;
-                            } else {
-                                if weak_sender.upgrade().is_none() {
-                                    info!("Detected (with seed already fetched) that a seed channel is no longer open \
-                                    for receiving");
-                                } else {
-                                    error!("Error writing to shared buffer: {:?}", result);
-                                }
-                                return;
-                            }
-                        }
-                    }
+            loop {
+                let bytes: &mut [u8; WORDS_PER_SEED * size_of::<u64>()] = cast_mut::<[u64; WORDS_PER_SEED], [u8; WORDS_PER_SEED * size_of::<u64>()]>(seed_from_source.as_mut());
+                source.fill_bytes(bytes);
+                let result = sender.send(seed_from_source);
+                if !result.is_ok() {
+                    info!("Detected (with seed already fetched) that a seed channel is no longer open for receiving");
+                    return;
                 }
             }
         }).unwrap();
         SharedBufferRng {
-            receiver: Arc::new(Mutex::new(receiver)),
-            _sender: sender.into(),
+            receiver: receiver.into(),
             _source: PhantomData::default()
         }
     }
@@ -194,7 +169,7 @@ for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType> {
     type Results = DefaultableAlignedArray<WORDS_PER_SEED, u64>;
 
     fn generate(&mut self, results: &mut Self::Results) {
-        match self.receiver.lock().unwrap().recv() {
+        match self.receiver.recv() {
             Ok(seed) => {
                 *results = seed;
                 return;
