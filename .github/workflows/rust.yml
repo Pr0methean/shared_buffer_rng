@@ -59,6 +59,6 @@ jobs:
       - name: Upload benchmark reports
         uses: actions/upload-artifact@v4
         with:
-          name: Optimization remarks
+          name: Criterion report
           path: target/criterion/report
           if-no-files-found: error
