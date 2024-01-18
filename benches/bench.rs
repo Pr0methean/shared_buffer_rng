@@ -137,7 +137,7 @@ fn benchmark_contended(c: &mut Criterion) {
 
 criterion_group! {
     name = benches;
-    config = Criterion::default().confidence_level(0.99).sample_size(2048).warm_up_time(Duration::from_secs(10));
+    config = Criterion::default().confidence_level(0.99).sample_size(4096).warm_up_time(Duration::from_secs(10));
     targets = benchmark_single_thread, benchmark_contended
 }
 criterion_main!(benches);
