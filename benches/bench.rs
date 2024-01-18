@@ -16,8 +16,8 @@ macro_rules! single_thread_bench {
     ($group:expr, $n:expr) => {
         let mut reseeding_from_shared =
             BenchmarkSharedBufferRng::<$n>::new(OsRng::default()).new_standard_rng(RESEEDING_THRESHOLD);
-        $group.bench_with_input(BenchmarkId::new("SharedBufferRng", $n)),
-        &$n, |b, _| b.iter(|| black_box(reseeding_from_shared.next_u64()));
+        $group.bench_with_input(BenchmarkId::new("SharedBufferRng", $n),
+        &$n, |b, _| b.iter(|| black_box(reseeding_from_shared.next_u64())));
         drop(reseeding_from_shared);
     };
 }
