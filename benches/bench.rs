@@ -17,9 +17,8 @@ macro_rules! single_thread_bench {
     ($group:expr, $n:expr) => {
         let mut reseeding_from_shared =
             BenchmarkSharedBufferRng::<$n>::new(OsRng::default()).new_standard_rng(RESEEDING_THRESHOLD);
-        $group.bench_function(BenchmarkId::new("With SharedBufferRng", format!("buffer size {:04}", $n)), |b| {
-            b.iter(|| black_box(reseeding_from_shared.next_u64()))
-        });
+        $group.bench_with_input(BenchmarkId::new("With SharedBufferRng", format!("buffer size {:04}", $n)),
+        &$n, |b, _| b.iter(|| black_box(reseeding_from_shared.next_u64())));
         drop(reseeding_from_shared);
     };
 }
@@ -76,9 +75,8 @@ macro_rules! benchmark_contended {
             .collect();
         let mut reseeding_from_shared = root.new_standard_rng(RESEEDING_THRESHOLD);
         drop(root);
-        $group.bench_function(BenchmarkId::new("With SharedBufferRng", format!("{:02} threads, buffer size {:04}", $threads, $n)), |b| {
-            b.iter(|| black_box(reseeding_from_shared.next_u64()))
-        });
+        $group.bench_with_input(BenchmarkId::new("With SharedBufferRng", format!("{:02} threads, buffer size {:04}", $threads, $n)),
+            &$n, |b, _| b.iter(|| black_box(reseeding_from_shared.next_u64())));
         FINISHED.store(true, SeqCst);
         background_threads
             .into_iter()
@@ -104,7 +102,7 @@ fn benchmark_contended(c: &mut Criterion) {
     benchmark_contended!(group, 512);
     benchmark_contended!(group, 1024);
     let num_cpus = num_cpus::get();
-    vec![num_cpus, num_cpus - 1].into_iter().for_each(|num_threads| {
+    [num_cpus, num_cpus - 1].into_iter().for_each(|num_threads| {
         let background_threads: Vec<_> = (0..(num_threads - 1))
             .map(|_| {
                 let mut rng = ReseedingRng::new(
