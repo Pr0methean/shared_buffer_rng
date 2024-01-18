@@ -1,3 +1,6 @@
+#![allow(incomplete_features)]
+#![feature(generic_const_exprs)]
+
 use core::mem::size_of;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rand::rngs::adapter::ReseedingRng;
@@ -15,9 +18,9 @@ const RESEEDING_THRESHOLD: u64 = 1024;
 
 struct RngBufferCore<const N: usize, T: Rng>(T);
 
-impl <const N: usize, T: Rng> BlockRngCore for RngBufferCore<N, T> {
+impl <const N: usize, T: Rng> BlockRngCore for RngBufferCore<N, T> where [(); WORDS_PER_STD_RNG * N]: {
     type Item = u64;
-    type Results = DefaultableAlignedArray<N, u64>;
+    type Results = DefaultableAlignedArray<{ WORDS_PER_STD_RNG * N }, u64>;
 
     fn generate(&mut self, results: &mut Self::Results) {
         self.0.fill_bytes(cast_slice_mut(results.as_mut()));
