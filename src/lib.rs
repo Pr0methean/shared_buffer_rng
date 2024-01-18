@@ -1,8 +1,9 @@
 #![allow(incomplete_features)]
 #![feature(generic_const_exprs)]
+#![feature(array_chunks)]
 
 use aligned::{Aligned, A64};
-use bytemuck::{cast_mut, AnyBitPattern, Pod, Zeroable};
+use bytemuck::{cast_mut, Pod, Zeroable};
 use core::fmt::Debug;
 use core::marker::PhantomData;
 use core::mem::size_of;
@@ -57,7 +58,7 @@ impl<const N: usize, T> AsRef<[T]> for DefaultableAlignedArray<N, T> {
 
 unsafe impl<const N: usize, T: Zeroable> Zeroable for DefaultableAlignedArray<N, T> {}
 
-unsafe impl<const N: usize, T: AnyBitPattern> AnyBitPattern for DefaultableAlignedArray<N, T> {}
+unsafe impl<const N: usize, T: Pod> Pod for DefaultableAlignedArray<N, T> {}
 
 /// An RNG that reads from a shared buffer, to which only one thread per buffer will read from a seed source. It will
 /// share the buffer with all of its clones. Once this and all clones have been dropped, the source-reading thread will
@@ -147,9 +148,9 @@ impl<
         const SEEDS_CAPACITY: usize,
         SourceType: Rng + Send + Debug + 'static,
     > SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType>
-where
-    [u8; WORDS_PER_SEED * size_of::<u64>()]: Pod,
+    where [u8; WORDS_PER_SEED * SEEDS_CAPACITY * size_of::<u64>()]: Pod,
     [u64; WORDS_PER_SEED]: Pod,
+    [u8; WORDS_PER_SEED * size_of::<u64>()]: Pod,
 {
     /// Creates an RNG that will have a new dedicated thread reading from [source] into a new buffer that's shared with
     /// all clones of this [SharedBufferRng].
@@ -157,16 +158,18 @@ where
         let (sender, receiver) = bounded(SEEDS_CAPACITY);
         info!("Creating a SharedBufferRngInner for {:?}", source);
         Builder::new().name(format!("Load seed from {:?} into shared buffer", source)).spawn(move || {
-            let mut seed_from_source
-                = DefaultableAlignedArray::<WORDS_PER_SEED, u64>::default();
+            let mut seeds_from_source = [0u8; WORDS_PER_SEED * SEEDS_CAPACITY * size_of::<u64>()];
+            let mut aligned_seed: DefaultableAlignedArray<WORDS_PER_SEED, u64> = DefaultableAlignedArray::default();
             loop {
-                let bytes: &mut [u8; WORDS_PER_SEED * size_of::<u64>()]
-                    = cast_mut::<[u64; WORDS_PER_SEED], [u8; WORDS_PER_SEED * size_of::<u64>()]>(seed_from_source.as_mut());
-                source.fill_bytes(bytes);
-                let result = sender.send(seed_from_source);
-                if !result.is_ok() {
-                    info!("Detected (with seed already fetched) that a seed channel is no longer open for receiving");
-                    return;
+                source.fill_bytes(&mut seeds_from_source);
+                for seed in seeds_from_source.array_chunks() {
+                    *cast_mut::<[u64; WORDS_PER_SEED],
+                        [u8; WORDS_PER_SEED * size_of::<u64>()]>(aligned_seed.as_mut()) = *seed;
+                    let result = sender.send(aligned_seed);
+                    if !result.is_ok() {
+                        info!("Detected (with seed already fetched) that a seed channel is no longer open for receiving");
+                        return;
+                    }
                 }
             }
         }).unwrap();
