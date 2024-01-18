@@ -1,20 +1,20 @@
 #![feature(generic_const_exprs)]
 
+use aligned::{Aligned, A64};
+use bytemuck::{cast_mut, AnyBitPattern, Pod, Zeroable};
 use core::fmt::Debug;
 use core::marker::PhantomData;
 use core::mem::size_of;
+use crossbeam_channel::{bounded, Receiver};
+use log::info;
+use rand::rngs::adapter::ReseedingRng;
+use rand::rngs::OsRng;
+use rand::Rng;
+use rand_chacha::ChaCha12Core;
+use rand_core::block::{BlockRng64, BlockRngCore};
+use rand_core::{CryptoRng, RngCore, SeedableRng};
 use std::sync::OnceLock;
 use std::thread::Builder;
-use aligned::{A64, Aligned};
-use crossbeam_channel::{Receiver, bounded};
-use bytemuck::{AnyBitPattern, cast_mut, Pod, Zeroable};
-use log::{info};
-use rand::Rng;
-use rand::rngs::{OsRng};
-use rand_core::{CryptoRng, RngCore, SeedableRng};
-use rand_core::block::{BlockRng64, BlockRngCore};
-use rand::rngs::adapter::ReseedingRng;
-use rand_chacha::ChaCha12Core;
 
 // Alignment is chosen to prevent "false sharing" (i.e. instance A and instance B being part of or straddling the same
 // cache line, which would prevent &mut A from being used concurrently with &B or &mut B because only one CPU core can
@@ -23,31 +23,31 @@ use rand_chacha::ChaCha12Core;
 #[derive(Copy, Clone)]
 pub struct DefaultableAlignedArray<const N: usize, T>(Aligned<A64, [T; N]>);
 
-impl <const N: usize, T: Default + Copy> Default for DefaultableAlignedArray<N, T> {
+impl<const N: usize, T: Default + Copy> Default for DefaultableAlignedArray<N, T> {
     fn default() -> Self {
         DefaultableAlignedArray(Aligned([T::default(); N]))
     }
 }
 
-impl <const N: usize, T> AsMut<[T; N]> for DefaultableAlignedArray<N, T> {
+impl<const N: usize, T> AsMut<[T; N]> for DefaultableAlignedArray<N, T> {
     fn as_mut(&mut self) -> &mut [T; N] {
         &mut self.0
     }
 }
 
-impl <const N: usize, T> AsMut<[T]> for DefaultableAlignedArray<N, T> {
+impl<const N: usize, T> AsMut<[T]> for DefaultableAlignedArray<N, T> {
     fn as_mut(&mut self) -> &mut [T] {
         self.0.as_mut_slice()
     }
 }
 
-impl <const N: usize, T> AsRef<[T; N]> for DefaultableAlignedArray<N, T> {
+impl<const N: usize, T> AsRef<[T; N]> for DefaultableAlignedArray<N, T> {
     fn as_ref(&self) -> &[T; N] {
         &self.0
     }
 }
 
-impl <const N: usize, T> AsRef<[T]> for DefaultableAlignedArray<N, T> {
+impl<const N: usize, T> AsRef<[T]> for DefaultableAlignedArray<N, T> {
     fn as_ref(&self) -> &[T] {
         self.0.as_slice()
     }
@@ -55,7 +55,7 @@ impl <const N: usize, T> AsRef<[T]> for DefaultableAlignedArray<N, T> {
 
 unsafe impl<const N: usize, T: Zeroable> Zeroable for DefaultableAlignedArray<N, T> {}
 
-unsafe impl <const N: usize, T: AnyBitPattern> AnyBitPattern for DefaultableAlignedArray<N, T> {}
+unsafe impl<const N: usize, T: AnyBitPattern> AnyBitPattern for DefaultableAlignedArray<N, T> {}
 
 /// An RNG that reads from a shared buffer, to which only one thread per buffer will read from a seed source. It will
 /// share the buffer with all of its clones. Once this and all clones have been dropped, the source-reading thread will
@@ -72,29 +72,33 @@ unsafe impl <const N: usize, T: AnyBitPattern> AnyBitPattern for DefaultableAlig
 pub struct SharedBufferRng<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType> {
     receiver: Receiver<DefaultableAlignedArray<WORDS_PER_SEED, u64>>,
     // Used to determine whether to implement CryptoRng
-    _source: PhantomData<SourceType>
+    _source: PhantomData<SourceType>,
 }
 
 // Can't derive Clone because that would only work for SourceType: Clone but we don't actually clone the source
-impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType> Clone
-for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType> {
+impl<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType> Clone
+    for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType>
+{
     /// Returns a new SharedBufferRng view on the same buffer.
     fn clone(&self) -> Self {
         SharedBufferRng {
             receiver: self.receiver.clone(),
-            _source: self._source
+            _source: self._source,
         }
     }
 }
 
-impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType>
-SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType> {
+impl<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType>
+    SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType>
+{
     pub fn new_seeder(&self) -> BlockRng64<Self> {
         BlockRng64::new(self.clone())
     }
 
-    pub fn new_standard_rng(&self, reseeding_threshold: u64)
-            -> ReseedingRng<ChaCha12Core, BlockRng64<SharedBufferRngStd>> {
+    pub fn new_standard_rng(
+        &self,
+        reseeding_threshold: u64,
+    ) -> ReseedingRng<ChaCha12Core, BlockRng64<SharedBufferRngStd>> {
         let mut reseeder = seeder_from_default_buffer();
         let mut seed = <ChaCha12Core as SeedableRng>::Seed::default();
         reseeder.fill_bytes(&mut seed);
@@ -136,18 +140,26 @@ pub fn default_rng() -> ReseedingRngStd {
     get_default_root().new_default_rng()
 }
 
-impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType: Rng + Send + Debug + 'static>
-    SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType>
-    where [u8; WORDS_PER_SEED * size_of::<u64>()]: Pod, [u64; WORDS_PER_SEED]: Pod {
+impl<
+        const WORDS_PER_SEED: usize,
+        const SEEDS_CAPACITY: usize,
+        SourceType: Rng + Send + Debug + 'static,
+    > SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType>
+where
+    [u8; WORDS_PER_SEED * size_of::<u64>()]: Pod,
+    [u64; WORDS_PER_SEED]: Pod,
+{
     /// Creates an RNG that will have a new dedicated thread reading from [source] into a new buffer that's shared with
     /// all clones of this [SharedBufferRng].
     pub fn new(mut source: SourceType) -> Self {
         let (sender, receiver) = bounded(SEEDS_CAPACITY);
         info!("Creating a SharedBufferRngInner for {:?}", source);
         Builder::new().name(format!("Load seed from {:?} into shared buffer", source)).spawn(move || {
-            let mut seed_from_source = DefaultableAlignedArray::<WORDS_PER_SEED, u64>::default();
+            let mut seed_from_source
+                = DefaultableAlignedArray::<WORDS_PER_SEED, u64>::default();
             loop {
-                let bytes: &mut [u8; WORDS_PER_SEED * size_of::<u64>()] = cast_mut::<[u64; WORDS_PER_SEED], [u8; WORDS_PER_SEED * size_of::<u64>()]>(seed_from_source.as_mut());
+                let bytes: &mut [u8; WORDS_PER_SEED * size_of::<u64>()]
+                    = cast_mut::<[u64; WORDS_PER_SEED], [u8; WORDS_PER_SEED * size_of::<u64>()]>(seed_from_source.as_mut());
                 source.fill_bytes(bytes);
                 let result = sender.send(seed_from_source);
                 if !result.is_ok() {
@@ -158,13 +170,14 @@ impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType: Rng 
         }).unwrap();
         SharedBufferRng {
             receiver: receiver.into(),
-            _source: PhantomData::default()
+            _source: PhantomData::default(),
         }
     }
 }
 
-impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType> BlockRngCore
-for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType> {
+impl<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType> BlockRngCore
+    for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType>
+{
     type Item = u64;
     type Results = DefaultableAlignedArray<WORDS_PER_SEED, u64>;
 
@@ -173,46 +186,51 @@ for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType> {
             Ok(seed) => {
                 *results = seed;
                 return;
-            },
-            Err(e) => panic!("Error from recv(): {}", e)
+            }
+            Err(e) => panic!("Error from recv(): {}", e),
         }
     }
 }
 
-impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, T: CryptoRng> CryptoRng
-for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, T> {}
+impl<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, T: CryptoRng> CryptoRng
+    for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, T>
+{
+}
 
 #[cfg(test)]
 mod tests {
-    use core::sync::atomic::{AtomicUsize, Ordering::SeqCst};
-    use std::sync::{OnceLock};
-    use rand_core::block::{BlockRng64, BlockRngCore};
-    use rand_core::{Error};
-    use scc::Bag;
-    use std::thread::spawn;
     use super::*;
+    use core::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    use rand_core::block::{BlockRng64, BlockRngCore};
+    use rand_core::Error;
+    use scc::Bag;
+    use std::sync::OnceLock;
+    use std::thread::spawn;
 
     const U8_VALUES: usize = u8::MAX as usize + 1;
 
     #[derive(Debug)]
     struct ByteValuesInOrderRng {
-        words_written: AtomicUsize
+        words_written: AtomicUsize,
     }
 
     impl BlockRngCore for ByteValuesInOrderRng {
         type Item = u64;
-        type Results = DefaultableAlignedArray<1,u64>;
+        type Results = DefaultableAlignedArray<1, u64>;
 
         fn generate(&mut self, results: &mut Self::Results) {
             let first_word = self.words_written.fetch_add(U8_VALUES, SeqCst);
 
-            results.0.iter_mut().zip(first_word..first_word + U8_VALUES)
-                                         .for_each(|(result_word, word_num)| *result_word = word_num as u64);
+            results
+                .0
+                .iter_mut()
+                .zip(first_word..first_word + U8_VALUES)
+                .for_each(|(result_word, word_num)| *result_word = word_num as u64);
         }
     }
 
     #[test]
-    fn basic_test() -> Result<(), Error>{
+    fn basic_test() -> Result<(), Error> {
         use rand::rngs::StdRng;
         use rand::SeedableRng;
         let shared_seeder = SharedBufferRngStd::new(OsRng::default());
@@ -230,8 +248,10 @@ mod tests {
         WORDS.get_or_init(Bag::new);
         const THREADS: usize = 2;
         const ITERS_PER_THREAD: usize = 1;
-        let seeder: SharedBufferRng<8,4,_> = SharedBufferRng::new(BlockRng64::new(
-            ByteValuesInOrderRng { words_written: AtomicUsize::new(0)}));
+        let seeder: SharedBufferRng<8, 4, _> =
+            SharedBufferRng::new(BlockRng64::new(ByteValuesInOrderRng {
+                words_written: AtomicUsize::new(0),
+            }));
         let ths: Vec<_> = (0..THREADS)
             .map(|_| {
                 let mut seeder_clone = BlockRng64::new(seeder.clone());
@@ -246,7 +266,10 @@ mod tests {
             th.join().unwrap();
         }
         let mut words_sorted = Vec::new();
-        WORDS.get().unwrap().pop_all((), |(), word| words_sorted.push(word));
+        WORDS
+            .get()
+            .unwrap()
+            .pop_all((), |(), word| words_sorted.push(word));
         let mut words_dedup = words_sorted.clone();
         words_dedup.dedup();
         assert_eq!(words_dedup.len(), words_sorted.len());
