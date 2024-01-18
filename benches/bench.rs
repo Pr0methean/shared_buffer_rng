@@ -60,9 +60,11 @@ macro_rules! benchmark_contended {
 
     ($group:expr, $n:expr, $threads:expr) => {
         let root = BenchmarkSharedBufferRng::<$n>::new(OsRng::default());
-        let background_threads: Vec<_> = (0..($threads - 1))
-            .map(|_| {
-                let mut rng = root.new_standard_rng(RESEEDING_THRESHOLD);
+        let rngs: Vec<_> = (0..($threads - 1))
+            .map(|_| root.new_standard_rng(RESEEDING_THRESHOLD))
+            .collect();
+        let background_threads: Vec<_> = rngs.into_iter()
+            .map(|mut rng| {
                 spawn(move || {
                     while !FINISHED.load(SeqCst) {
                         black_box(rng.next_u64());
