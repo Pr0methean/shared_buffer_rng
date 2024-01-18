@@ -36,7 +36,8 @@ jobs:
       - name: Build Benchmarks
         uses: actions-rs/cargo@v1
         with:
-          command: build --benches
+          command: build
+          args: --benches
           toolchain: nightly
       - name: Save Rust cache
         uses: actions/cache/save@v3
