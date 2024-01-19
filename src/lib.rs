@@ -156,17 +156,26 @@ impl<
         let (sender, receiver) = bounded(SEEDS_CAPACITY);
         info!("Creating a SharedBufferRngInner for {:?}", source);
         Builder::new().name(format!("Load seed from {:?} into shared buffer", source)).spawn(move || {
-            let mut seeds_from_source = [0u8; WORDS_PER_SEED * SEEDS_CAPACITY * size_of::<u64>()];
             let mut aligned_seed: DefaultableAlignedArray<WORDS_PER_SEED, u64> = DefaultableAlignedArray::default();
-            loop {
-                source.fill_bytes(&mut seeds_from_source);
-                for seed in seeds_from_source.array_chunks::<{ WORDS_PER_SEED * size_of::<u64>() }>() {
-                    cast_slice_mut(aligned_seed.as_mut()).copy_from_slice(&*seed);
-                    let result = sender.send(aligned_seed);
-                    if !result.is_ok() {
-                        info!("Detected (with seed already fetched) that a seed channel is no longer open for receiving");
-                        return;
+            if SEEDS_CAPACITY > 1 {
+                let mut seeds_from_source = [0u8; WORDS_PER_SEED * SEEDS_CAPACITY * size_of::<u64>()];
+                loop {
+                    source.fill_bytes(&mut seeds_from_source);
+                    for seed in seeds_from_source.array_chunks::<{ WORDS_PER_SEED * size_of::<u64>() }>() {
+                        cast_slice_mut(aligned_seed.as_mut()).copy_from_slice(&*seed);
+                        let result = sender.send(aligned_seed);
+                        if !result.is_ok() {
+                            info!("Detected (with seed already fetched) that a seed channel is no longer open for receiving");
+                            return;
+                        }
                     }
+                }
+            } else {
+                source.fill_bytes(cast_slice_mut(aligned_seed.as_mut()));
+                let result = sender.send(aligned_seed);
+                if !result.is_ok() {
+                    info!("Detected (with seed already fetched) that a seed channel is no longer open for receiving");
+                    return;
                 }
             }
         }).unwrap();
