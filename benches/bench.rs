@@ -77,9 +77,7 @@ static FINISHED: AtomicBool = AtomicBool::new(false);
 
 macro_rules! benchmark_contended {
     ($group:expr, $n:expr) => {
-        let cpus = num_cpus::get();
-        benchmark_contended!($group, $n, cpus - 1);
-        benchmark_contended!($group, $n, cpus);
+        benchmark_contended!($group, $n, num_cpus::get_physical());
     };
 
     ($group:expr, $n:expr, $threads:expr) => {
