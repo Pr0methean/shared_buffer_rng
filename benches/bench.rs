@@ -151,35 +151,33 @@ fn benchmark_contended(c: &mut Criterion) {
     benchmark_contended!(group, 256);
     benchmark_contended!(group, 512);
     benchmark_contended!(group, 1024);
-    let num_cpus = num_cpus::get();
-    [num_cpus, num_cpus - 1].into_iter().for_each(|num_threads| {
-        let background_threads: Vec<_> = (0..(num_threads - 1))
-            .map(|_| {
-                let mut rng = ReseedingRng::new(
-                    ChaCha12Core::from_rng(OsRng::default()).unwrap(),
-                    RESEEDING_THRESHOLD,
-                    OsRng::default(),
-                );
-                spawn(move || {
-                    while !FINISHED.load(SeqCst) {
-                        black_box(rng.next_u64());
-                    }
-                })
+    let num_threads = num_cpus::get_physical();
+    let background_threads: Vec<_> = (0..(num_threads - 1))
+        .map(|_| {
+            let mut rng = ReseedingRng::new(
+                ChaCha12Core::from_rng(OsRng::default()).unwrap(),
+                RESEEDING_THRESHOLD,
+                OsRng::default(),
+            );
+            spawn(move || {
+                while !FINISHED.load(SeqCst) {
+                    black_box(rng.next_u64());
+                }
             })
-            .collect();
-        let mut reseeding_from_os = ReseedingRng::new(
-            ChaCha12Core::from_rng(OsRng::default()).unwrap(),
-            RESEEDING_THRESHOLD,
-            OsRng::default(),
-        );
-        group.bench_function(format!("OsRng, {:02} threads", num_threads), |b| {
-            b.iter(|| black_box(reseeding_from_os.next_u64()))
-        });
-        FINISHED.store(true, SeqCst);
-        background_threads
-            .into_iter()
-            .for_each(|handle| handle.join().unwrap());
+        })
+        .collect();
+    let mut reseeding_from_os = ReseedingRng::new(
+        ChaCha12Core::from_rng(OsRng::default()).unwrap(),
+        RESEEDING_THRESHOLD,
+        OsRng::default(),
+    );
+    group.bench_function(format!("OsRng, {:02} threads", num_threads), |b| {
+        b.iter(|| black_box(reseeding_from_os.next_u64()))
     });
+    FINISHED.store(true, SeqCst);
+    background_threads
+        .into_iter()
+        .for_each(|handle| handle.join().unwrap());
     group.finish();
 }
 
