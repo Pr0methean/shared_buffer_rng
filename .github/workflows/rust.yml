@@ -23,10 +23,10 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-            target/debug/
-            target/release/
+            target/debug/*/
+            target/release/*/
             Cargo.lock
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.toml', 'src/**/*.rs', 'benches/**/*.rs', '.github/workflows/rust.yml') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.toml', '.github/workflows/rust.yml') }}
       - name: Install nightly Rust
         uses: actions-rs/toolchain@v1
         with:
@@ -51,10 +51,10 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-            target/debug/
-            target/release/
+            target/debug/*/
+            target/release/*/
             Cargo.lock
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.toml', 'src/**/*.rs', 'benches/**/*.rs', '.github/workflows/rust.yml') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.toml', '.github/workflows/rust.yml') }}
       - name: Run benchmarks
         uses: actions-rs/cargo@v1
         with:
