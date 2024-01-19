@@ -36,12 +36,14 @@ macro_rules! single_thread_bench {
         $group.bench_with_input(BenchmarkId::new("SharedBufferRng", $n),
         &$n, |b, _| b.iter(|| black_box(reseeding_from_shared.next_u64())));
         drop(reseeding_from_shared);
-        let mut buffer = BlockRng64::new(RngBufferCore::<$n, OsRng>(OsRng::default()));
-        let mut seed = [0u8; 32];
-        buffer.fill_bytes(&mut seed);
-        let mut reseeding_from_buffer = ReseedingRng::new(ChaCha12Core::from_seed(seed), RESEEDING_THRESHOLD, buffer);
-        $group.bench_with_input(BenchmarkId::new("RngBufferCore", $n),
-        &$n, |b, _| b.iter(|| black_box(reseeding_from_buffer.next_u64())));
+        if $n > 1 {
+            let mut buffer = BlockRng64::new(RngBufferCore::<$n, OsRng>(OsRng::default()));
+            let mut seed = [0u8; 32];
+            buffer.fill_bytes(&mut seed);
+            let mut reseeding_from_buffer = ReseedingRng::new(ChaCha12Core::from_seed(seed), RESEEDING_THRESHOLD, buffer);
+            $group.bench_with_input(BenchmarkId::new("RngBufferCore", $n),
+            &$n, |b, _| b.iter(|| black_box(reseeding_from_buffer.next_u64())));
+        }
     };
 }
 
@@ -103,34 +105,36 @@ macro_rules! benchmark_contended {
             .into_iter()
             .for_each(|handle| handle.join().unwrap());
         FINISHED.store(false, SeqCst);
-        let rngs: Vec<_> = (0..($threads - 1))
-            .map(|_| {
-                let mut buffer = BlockRng64::new(RngBufferCore::<$n, OsRng>(OsRng::default()));
-                let mut seed = [0u8; 32];
-                buffer.fill_bytes(&mut seed);
-                ReseedingRng::new(ChaCha12Core::from_seed(seed), RESEEDING_THRESHOLD, buffer)
-            })
-            .collect();
-        let background_threads: Vec<_> = rngs.into_iter()
-            .map(|mut rng| {
-                spawn(move || {
-                    while !FINISHED.load(SeqCst) {
-                        black_box(rng.next_u64());
-                    }
+        if $n > 1 {
+            let rngs: Vec<_> = (0..($threads - 1))
+                .map(|_| {
+                    let mut buffer = BlockRng64::new(RngBufferCore::<$n, OsRng>(OsRng::default()));
+                    let mut seed = [0u8; 32];
+                    buffer.fill_bytes(&mut seed);
+                    ReseedingRng::new(ChaCha12Core::from_seed(seed), RESEEDING_THRESHOLD, buffer)
                 })
-            })
-            .collect();
-        let mut buffer = BlockRng64::new(RngBufferCore::<$n, OsRng>(OsRng::default()));
-        let mut seed = [0u8; 32];
-        buffer.fill_bytes(&mut seed);
-        let mut reseeding_from_buffer = ReseedingRng::new(ChaCha12Core::from_seed(seed), RESEEDING_THRESHOLD, buffer);
-        $group.bench_with_input(BenchmarkId::new(format!("RngBufferCore, {:02} threads", $threads), $n),
-        &$n, |b, _| b.iter(|| black_box(reseeding_from_buffer.next_u64())));
-        FINISHED.store(true, SeqCst);
-        background_threads
-            .into_iter()
-            .for_each(|handle| handle.join().unwrap());
-        FINISHED.store(false, SeqCst);
+                .collect();
+            let background_threads: Vec<_> = rngs.into_iter()
+                .map(|mut rng| {
+                    spawn(move || {
+                        while !FINISHED.load(SeqCst) {
+                            black_box(rng.next_u64());
+                        }
+                    })
+                })
+                .collect();
+            let mut buffer = BlockRng64::new(RngBufferCore::<$n, OsRng>(OsRng::default()));
+            let mut seed = [0u8; 32];
+            buffer.fill_bytes(&mut seed);
+            let mut reseeding_from_buffer = ReseedingRng::new(ChaCha12Core::from_seed(seed), RESEEDING_THRESHOLD, buffer);
+            $group.bench_with_input(BenchmarkId::new(format!("RngBufferCore, {:02} threads", $threads), $n),
+            &$n, |b, _| b.iter(|| black_box(reseeding_from_buffer.next_u64())));
+            FINISHED.store(true, SeqCst);
+            background_threads
+                .into_iter()
+                .for_each(|handle| handle.join().unwrap());
+            FINISHED.store(false, SeqCst);
+        }
     };
 }
 
