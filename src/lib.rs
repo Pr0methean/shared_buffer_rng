@@ -4,7 +4,6 @@
 #![feature(maybe_uninit_slice)]
 #![feature(maybe_uninit_as_bytes)]
 
-use aligned::{Aligned, A64};
 use bytemuck::{cast_slice_mut, Pod, Zeroable};
 use core::fmt::Debug;
 use core::mem::{MaybeUninit, replace, size_of};
@@ -18,26 +17,23 @@ use rand_core::block::{BlockRng64, BlockRngCore};
 use rand_core::{CryptoRng, RngCore, SeedableRng};
 use std::sync::{Arc, OnceLock};
 use std::thread::{Builder};
+use crossbeam_utils::CachePadded;
 use thread_local_object::{ThreadLocal};
 use thread_priority::ThreadPriority;
 
-// Alignment is chosen to prevent "false sharing" (i.e. instance A and instance B being part of or straddling the same
-// cache line, which would prevent &mut A from being used concurrently with &B or &mut B because only one CPU core can
-// have a given cache line in the modified state). All modern x86, ARM, x86-64 and Aarch64 CPUs have 64-byte cache
-// lines. TODO: Find a future-proof way to choose the right alignment for obscure architectures.
 #[derive(Copy, Clone)]
 #[repr(transparent)] // may be necessary to make Bytemuck transmutation safe
-pub struct DefaultableAlignedArray<const N: usize, T>(Aligned<A64, [T; N]>);
+pub struct DefaultableAlignedArray<const N: usize, T>(CachePadded<[T; N]>);
 
 impl<const N: usize, T: Default + Copy> Default for DefaultableAlignedArray<N, T> {
     fn default() -> Self {
-        DefaultableAlignedArray(Aligned([T::default(); N]))
+        DefaultableAlignedArray(CachePadded::new([T::default(); N]))
     }
 }
 
 impl<const N: usize, T: Default + Copy> From<[T; N]> for DefaultableAlignedArray<N, T> {
     fn from(value: [T; N]) -> Self {
-        Self(Aligned(value))
+        Self(CachePadded::new(value))
     }
 }
 
@@ -84,7 +80,7 @@ impl <T, U: From<T>> Drop for RecyclableVec<T, U> {
 
 /// An RNG that reads from a shared buffer, to which only one thread per buffer will read from a seed source. It will
 /// share the buffer with all of its clones. Once this and all clones have been dropped, the source-reading thread will
-/// detect this using a [std::sync::Weak] reference and terminate. Since this RNG is used to implement [BlockRngCore]
+/// detect this and terminate. Since this RNG is used to implement [BlockRngCore]
 /// for instances of [BlockRng64], it can produce seeds of any desired size, but a `[u64; [WORDS_PER_SEED]]` will be
 /// fastest.
 ///
