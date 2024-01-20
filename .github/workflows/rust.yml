@@ -12,10 +12,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-      - name: Install gnuplot
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt install gnuplot
+          sudo apt -y install gnuplot valgrind
       - name: Restore Rust cache
         uses: actions/cache/restore@v3
         with:

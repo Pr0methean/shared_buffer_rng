@@ -20,9 +20,14 @@ thread-local-object = "0.1.0"
 scc = "2.0.9"
 criterion = { version = "0.5.1", features = ["html_reports"] }
 num_cpus = "1.16.0"
+iai = "0.1.1"
 
 [[bench]]
 name = "bench"
+harness = false
+
+[[bench]]
+name = "iai"
 harness = false
 
 [profile.release]
