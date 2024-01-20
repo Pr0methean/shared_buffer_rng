@@ -10,8 +10,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::SeqCst;
 use std::thread::spawn;
 use rand_core::block::BlockRng64;
-mod lib;
-use lib::{BenchmarkSharedBufferRng, RngBufferCore, RESEEDING_THRESHOLD};
+mod common;
+use common::{BenchmarkSharedBufferRng, RngBufferCore, RESEEDING_THRESHOLD};
 
 macro_rules! single_thread_bench {
     ($group:expr, $n:expr) => {
