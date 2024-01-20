@@ -18,7 +18,7 @@ use rand_core::block::{BlockRng64, BlockRngCore};
 use rand_core::{CryptoRng, RngCore, SeedableRng};
 use std::sync::{Arc, OnceLock};
 use std::thread::{Builder};
-use thread_local_object::{Entry, ThreadLocal};
+use thread_local_object::{ThreadLocal};
 use thread_priority::ThreadPriority;
 
 // Alignment is chosen to prevent "false sharing" (i.e. instance A and instance B being part of or straddling the same
@@ -211,46 +211,26 @@ impl<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType: Rng +
     type Results = DefaultableAlignedArray<WORDS_PER_SEED, u64>;
 
     fn generate(&mut self, results: &mut Self::Results) {
-        self.thread_local_buffer.entry(|entry| match entry {
-            Entry::Occupied(local_buffer) => {
-                let local_buffer = local_buffer.into_mut();
-                if !local_buffer.contents.is_empty() {
-                    *(results.as_mut()) = local_buffer.contents.pop().unwrap();
-                } else {
-                    match self.receiver.try_recv() {
-                        Ok(seed) => *results = seed,
-                        Err(TryRecvError::Empty) => {
-                            unsafe {
-                                self.source.clone().fill_bytes(
-                                    MaybeUninit::slice_assume_init_mut(MaybeUninit::slice_as_bytes_mut(local_buffer.contents.spare_capacity_mut())));
-                                local_buffer.contents.set_len(SEEDS_CAPACITY);
-                            }
-                            *(results.as_mut()) = local_buffer.contents.pop().unwrap();
-                        },
-                        Err(TryRecvError::Disconnected) => panic!("SharedBufferRng already closed"),
+        let mut local_buffer = self.thread_local_buffer.get(|_| RecyclableVec {
+            contents: Vec::<[u64; WORDS_PER_SEED]>::with_capacity(SEEDS_CAPACITY),
+            recycler: self.sender.clone()
+        });
+        if !local_buffer.contents.is_empty() {
+            *(results.as_mut()) = local_buffer.contents.pop().unwrap();
+        } else {
+            match self.receiver.try_recv() {
+                Ok(seed) => *results = seed,
+                Err(TryRecvError::Empty) => {
+                    unsafe {
+                        self.source.clone().fill_bytes(
+                            MaybeUninit::slice_assume_init_mut(MaybeUninit::slice_as_bytes_mut(local_buffer.contents.spare_capacity_mut())));
+                        local_buffer.contents.set_len(SEEDS_CAPACITY);
                     }
-                }
+                    *(results.as_mut()) = local_buffer.contents.pop().unwrap();
+                },
+                Err(TryRecvError::Disconnected) => panic!("SharedBufferRng already closed"),
             }
-            Entry::Vacant(vacancy) => {
-                match self.receiver.try_recv() {
-                    Ok(seed) => *results = seed,
-                    Err(TryRecvError::Empty) => {
-                        let mut local_buffer = Vec::with_capacity(SEEDS_CAPACITY);
-                        unsafe {
-                            self.source.clone().fill_bytes(
-                                MaybeUninit::slice_assume_init_mut(MaybeUninit::slice_as_bytes_mut(local_buffer.spare_capacity_mut())));
-                            local_buffer.set_len(SEEDS_CAPACITY);
-                        }
-                        *(results.as_mut()) = local_buffer.pop().unwrap();
-                        vacancy.insert(RecyclableVec {
-                            contents: local_buffer,
-                            recycler: self.sender.clone()
-                        });
-                    },
-                    Err(TryRecvError::Disconnected) => panic!("SharedBufferRng already closed"),
-                }
-            }
-        })
+        }
 
     }
 }
