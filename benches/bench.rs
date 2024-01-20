@@ -27,12 +27,12 @@ impl <const N: usize, T: Rng> BlockRngCore for RngBufferCore<N, T> where [(); WO
     }
 }
 
-type BenchmarkSharedBufferRng<const N: usize> = SharedBufferRng<WORDS_PER_STD_RNG, N, OsRng>;
+type BenchmarkSharedBufferRng<const N: usize> = SharedBufferRng<WORDS_PER_STD_RNG, N, OsRng, fn() -> OsRng>;
 
 macro_rules! single_thread_bench {
     ($group:expr, $n:expr) => {
         let mut reseeding_from_shared =
-            BenchmarkSharedBufferRng::<$n>::new(OsRng::default()).new_standard_rng(RESEEDING_THRESHOLD);
+            BenchmarkSharedBufferRng::<$n>::new(OsRng::default(), Some(OsRng::default)).new_standard_rng(RESEEDING_THRESHOLD);
         $group.bench_with_input(BenchmarkId::new("SharedBufferRng", $n),
         &$n, |b, _| b.iter(|| black_box(reseeding_from_shared.next_u64())));
         drop(reseeding_from_shared);
@@ -81,7 +81,7 @@ macro_rules! benchmark_contended {
     };
 
     ($group:expr, $n:expr, $threads:expr) => {
-        let root = BenchmarkSharedBufferRng::<$n>::new(OsRng::default());
+        let root = BenchmarkSharedBufferRng::<$n>::new(OsRng::default(), Some(OsRng::default));
         let rngs: Vec<_> = (0..($threads - 1))
             .map(|_| root.new_standard_rng(RESEEDING_THRESHOLD))
             .collect();
