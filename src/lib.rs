@@ -65,6 +65,7 @@ unsafe impl<const N: usize, T: Zeroable> Zeroable for DefaultableAlignedArray<N,
 
 unsafe impl<const N: usize, T: Pod> Pod for DefaultableAlignedArray<N, T> {}
 
+/// A vector that, when dropped, sends as many of its contents as possible without blocking to a channel.
 struct RecyclableVec<T, U: From<T>> {
     contents: Vec<T>,
     recycler: Sender<U>
@@ -74,26 +75,27 @@ impl <T, U: From<T>> Drop for RecyclableVec<T, U> {
     fn drop(&mut self) {
         let contents = replace(&mut self.contents, vec![]);
         let _ = contents.into_iter().map_while(
-            |seed| self.recycler.try_send(seed.into()).ok()).last();
+            |item| self.recycler.try_send(item.into()).ok()).last();
     }
 }
 
-/// An RNG that reads from a shared buffer, to which only one thread per buffer will read from a seed source. It will
-/// share the buffer with all of its clones. Once this and all clones have been dropped, the source-reading thread will
-/// detect this and terminate. Since this RNG is used to implement [BlockRngCore]
+/// An RNG intended for reseeding other RNGs, that fetches seeds into a channel that's shared with all of its clones,
+/// and also has a thread-local buffer in case a seed is needed when the shared channel is empty. For each channel there
+/// is a thread that reads enough seeds at once from the source to completely fill the buffer; it terminates once all
+/// [SharedBufferRng] instances using the channel are dropped.
+///
+/// Since this RNG is used to implement [BlockRngCore]
 /// for instances of [BlockRng64], it can produce seeds of any desired size, but a `[u64; [WORDS_PER_SEED]]` will be
 /// fastest.
 ///
 /// # Type parameters
 /// * [WORDS_PER_SEED] is the seed size to optimize for.
 /// * [SEEDS_CAPACITY] is the maximum number of `[u64; [WORDS_PER_SEED]]` instances to keep in memory for future use.
-/// * [SourceType] is the type of the seed source; currently it's only used to ensure the [SharedBufferRng] implements
-///   [CryptoRng] if and only if the seed source does so.
+/// * [SourceType] is the type of the seed source.
 #[derive(Clone)]
 pub struct SharedBufferRng<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType: Rng + Clone> {
     receiver: Receiver<DefaultableAlignedArray<WORDS_PER_SEED, u64>>,
     sender: Sender<DefaultableAlignedArray<WORDS_PER_SEED, u64>>,
-    // Used to determine whether to implement CryptoRng
     source: SourceType,
     thread_local_buffer: Arc<ThreadLocal<RecyclableVec<[u64; WORDS_PER_SEED], DefaultableAlignedArray<WORDS_PER_SEED, u64>>>>
 }
