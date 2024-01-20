@@ -7,7 +7,7 @@ use bytemuck::{cast_slice_mut, Pod, Zeroable};
 use core::fmt::Debug;
 use core::mem::size_of;
 use crossbeam_channel::{bounded, Receiver, TryRecvError};
-use log::{error, info};
+use log::info;
 use rand::rngs::adapter::ReseedingRng;
 use rand::rngs::OsRng;
 use rand::Rng;
@@ -16,7 +16,6 @@ use rand_core::block::{BlockRng64, BlockRngCore};
 use rand_core::{CryptoRng, RngCore, SeedableRng};
 use std::sync::OnceLock;
 use std::thread::Builder;
-use thread_priority::ThreadPriority;
 
 // Alignment is chosen to prevent "false sharing" (i.e. instance A and instance B being part of or straddling the same
 // cache line, which would prevent &mut A from being used concurrently with &B or &mut B because only one CPU core can
@@ -71,25 +70,15 @@ unsafe impl<const N: usize, T: Pod> Pod for DefaultableAlignedArray<N, T> {}
 /// * [SEEDS_CAPACITY] is the maximum number of `[u64; [WORDS_PER_SEED]]` instances to keep in memory for future use.
 /// * [SourceType] is the type of the seed source; currently it's only used to ensure the [SharedBufferRng] implements
 ///   [CryptoRng] if and only if the seed source does so.
-#[derive(Debug)]
-pub struct SharedBufferRng<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType: Rng,
-FallbackFn: Send + Sync + Clone + Fn() -> SourceType> {
+#[derive(Clone, Debug)]
+pub struct SharedBufferRng<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType: Rng + Clone> {
     receiver: Receiver<DefaultableAlignedArray<WORDS_PER_SEED, u64>>,
-    calling_thread_fallback: Option<FallbackFn>
+    // Used to determine whether to implement CryptoRng
+    source: SourceType,
 }
 
-impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType: Rng,
-    FallbackFn: Send + Sync + Clone + Fn() -> SourceType> Clone for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType, FallbackFn> {
-    fn clone(&self) -> Self {
-        Self {
-            receiver: self.receiver.clone(),
-            calling_thread_fallback: self.calling_thread_fallback.clone(),
-        }
-    }
-}
-
-impl<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType: Rng, FallbackFn: Sync + Send + Clone + Fn() -> SourceType>
-    SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType, FallbackFn>
+impl<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType: Rng + Clone>
+    SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType>
 {
     pub fn new_seeder(&self) -> BlockRng64<Self> {
         BlockRng64::new(self.clone())
@@ -113,14 +102,14 @@ impl<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType: Rng, 
 pub const WORDS_PER_STD_RNG: usize = 4;
 pub const SEEDS_PER_STD_BUFFER: usize = 128;
 
-pub type SharedBufferRngStd = SharedBufferRng<WORDS_PER_STD_RNG, SEEDS_PER_STD_BUFFER, OsRng, fn() -> OsRng>;
+pub type SharedBufferRngStd = SharedBufferRng<WORDS_PER_STD_RNG, SEEDS_PER_STD_BUFFER, OsRng>;
 
 pub type ReseedingRngStd = ReseedingRng<ChaCha12Core, BlockRng64<SharedBufferRngStd>>;
 
 static DEFAULT_ROOT: OnceLock<SharedBufferRngStd> = OnceLock::new();
 
 fn get_default_root() -> &'static SharedBufferRngStd {
-    DEFAULT_ROOT.get_or_init(|| SharedBufferRngStd::new(OsRng::default(), Some(OsRng::default)))
+    DEFAULT_ROOT.get_or_init(|| SharedBufferRngStd::new(OsRng::default()))
 }
 
 /// Gets a seed generator backed by the default instance of [SharedBufferRng].
@@ -143,22 +132,17 @@ pub fn default_rng() -> ReseedingRngStd {
 impl<
         const WORDS_PER_SEED: usize,
         const SEEDS_CAPACITY: usize,
-        SourceType: Rng + Send + Debug + 'static,
-        FallbackFn: Sync + Send + Clone + Fn() -> SourceType
-    > SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType, FallbackFn>
+        SourceType: Rng + Send + Clone + Debug + 'static,
+    > SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType>
     where [(); WORDS_PER_SEED * size_of::<u64>()]:, [(); WORDS_PER_SEED * SEEDS_CAPACITY * size_of::<u64>()]:
 {
     /// Creates an RNG that will have a new dedicated thread reading from [source] into a new buffer that's shared with
     /// all clones of this [SharedBufferRng].
-    pub fn new(mut source: SourceType, fallback: Option<FallbackFn>) -> Self {
+    pub fn new(mut source: SourceType) -> Self {
         let (sender, receiver) = bounded(SEEDS_CAPACITY);
-        let have_fallback = fallback.is_some();
         info!("Creating a SharedBufferRngInner for {:?}", source);
+        let source_copy = source.clone();
         Builder::new().name(format!("Load seed from {:?} into shared buffer", source)).spawn(move || {
-            if have_fallback {
-                ThreadPriority::Min.set_for_current()
-                    .unwrap_or_else(|e| error!("Error setting thread priority: {:?}", e));
-            }
             let mut aligned_seed: DefaultableAlignedArray<WORDS_PER_SEED, u64> = DefaultableAlignedArray::default();
             if SEEDS_CAPACITY > 1 {
                 let mut seeds_from_source = [0u8; WORDS_PER_SEED * SEEDS_CAPACITY * size_of::<u64>()];
@@ -186,34 +170,28 @@ impl<
         }).unwrap();
         SharedBufferRng {
             receiver: receiver.into(),
-            calling_thread_fallback: fallback
+            source: source_copy,
         }
     }
 }
 
-impl<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType: Rng, FallbackFn: Sync + Send + Clone + Fn() -> SourceType>
-BlockRngCore for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType, FallbackFn>
+impl<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType: Rng + Clone> BlockRngCore
+    for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType>
 {
     type Item = u64;
     type Results = DefaultableAlignedArray<WORDS_PER_SEED, u64>;
 
     fn generate(&mut self, results: &mut Self::Results) {
-        match &self.calling_thread_fallback {
-            Some(fallback) => match self.receiver.try_recv() {
-                Ok(seed) => *results = seed,
-                Err(TryRecvError::Empty) => fallback().fill_bytes(cast_slice_mut(results.as_mut())),
-                Err(TryRecvError::Disconnected) => panic!("SharedBufferRng already closed"),
-            }
-            None => match self.receiver.recv() {
-                Ok(seed) => *results = seed,
-                Err(e) => panic!("Error reading from SharedBufferRng: {}", e)
-            }
+        match self.receiver.try_recv() {
+            Ok(seed) => *results = seed,
+            Err(TryRecvError::Empty) => self.source.clone().fill_bytes(cast_slice_mut(results.as_mut())),
+            Err(TryRecvError::Disconnected) => panic!("SharedBufferRng already closed"),
         }
     }
 }
 
-impl<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, T: Rng + CryptoRng, FallbackFn: Sync + Send + Clone + Fn() -> T> CryptoRng
-    for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, T, FallbackFn>
+impl<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, T: Rng + CryptoRng + Clone> CryptoRng
+    for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, T>
 {
 }
 
@@ -253,7 +231,7 @@ mod tests {
     fn basic_test() -> Result<(), Error> {
         use rand::rngs::StdRng;
         use rand::SeedableRng;
-        let shared_seeder = SharedBufferRngStd::new(OsRng::default(), Some(OsRng::default));
+        let shared_seeder = SharedBufferRngStd::new(OsRng::default());
         let client_prng: StdRng = StdRng::from_rng(&mut BlockRng64::new(shared_seeder))?;
         let zero_seed_prng = StdRng::from_seed([0; 32]);
         assert_ne!(client_prng, zero_seed_prng);
@@ -262,11 +240,16 @@ mod tests {
 
     static WORDS: OnceLock<Bag<u64>> = OnceLock::new();
 
-    fn test_at_most_once_delivery<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType: Rng + 'static,
-        FallbackFn: Send + Sync + Clone + Fn() -> SourceType + 'static>
-    (seeder: SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType, FallbackFn>) {
+    #[test]
+    fn test_at_most_once_delivery() {
+        use rand_core::RngCore;
+        WORDS.get_or_init(Bag::new);
         const THREADS: usize = 2;
         const ITERS_PER_THREAD: usize = 1;
+        let seeder: SharedBufferRng<8, 4, _> =
+            SharedBufferRng::new(BlockRng64::new(ByteValuesInOrderRng {
+                words_written: AtomicUsize::new(0).into(),
+            }));
         let ths: Vec<_> = (0..THREADS)
             .map(|_| {
                 let mut seeder_clone = BlockRng64::new(seeder.clone());
@@ -288,23 +271,5 @@ mod tests {
         let mut words_dedup = words_sorted.clone();
         words_dedup.dedup();
         assert_eq!(words_dedup.len(), words_sorted.len());
-    }
-
-    #[test]
-    fn test_at_most_once_delivery_with_local_fallback() {
-        WORDS.get_or_init(Bag::new);
-        let source = ByteValuesInOrderRng {
-            words_written: AtomicUsize::new(0).into(),
-        };
-        let seeder: SharedBufferRng<8, 4, _, _> =
-            SharedBufferRng::new(BlockRng64::new(source.clone()), Some(move || BlockRng64::new(source.clone())));
-        test_at_most_once_delivery(seeder);
-        // Don't combine these; they can't run in parallel because both write to WORDS
-        let source = ByteValuesInOrderRng {
-            words_written: AtomicUsize::new(0).into(),
-        };
-        let seeder: SharedBufferRng<8, 4, _, _> =
-            SharedBufferRng::new(BlockRng64::new(source.clone()), None::<fn() -> _>);
-        test_at_most_once_delivery(seeder);
     }
 }
