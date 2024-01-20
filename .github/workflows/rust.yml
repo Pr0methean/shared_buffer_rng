@@ -5,7 +5,7 @@ on:
     branches: [ "master" ]
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -Clinker-plugin-lto -Cremark=all -Zremark-dir=/tmp/remarks -Clinker=clang-17
+  RUSTFLAGS: -Clinker-plugin-lto -Cremark=all -Zremark-dir=/tmp/remarks
 jobs:
   test:
     runs-on: ubuntu-latest
