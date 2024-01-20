@@ -7,7 +7,7 @@ use bytemuck::{cast_slice_mut, Pod, Zeroable};
 use core::fmt::Debug;
 use core::mem::size_of;
 use crossbeam_channel::{bounded, Receiver, TryRecvError};
-use log::info;
+use log::{error, info};
 use rand::rngs::adapter::ReseedingRng;
 use rand::rngs::OsRng;
 use rand::Rng;
@@ -16,6 +16,7 @@ use rand_core::block::{BlockRng64, BlockRngCore};
 use rand_core::{CryptoRng, RngCore, SeedableRng};
 use std::sync::OnceLock;
 use std::thread::Builder;
+use thread_priority::ThreadPriority;
 
 // Alignment is chosen to prevent "false sharing" (i.e. instance A and instance B being part of or straddling the same
 // cache line, which would prevent &mut A from being used concurrently with &B or &mut B because only one CPU core can
@@ -143,6 +144,7 @@ impl<
         info!("Creating a SharedBufferRngInner for {:?}", source);
         let source_copy = source.clone();
         Builder::new().name(format!("Load seed from {:?} into shared buffer", source)).spawn(move || {
+            ThreadPriority::Min.set_for_current().unwrap_or_else(|e| error!("Error setting thread priority: {:?}", e));
             let mut aligned_seed: DefaultableAlignedArray<WORDS_PER_SEED, u64> = DefaultableAlignedArray::default();
             if SEEDS_CAPACITY > 1 {
                 let mut seeds_from_source = [0u8; WORDS_PER_SEED * SEEDS_CAPACITY * size_of::<u64>()];
