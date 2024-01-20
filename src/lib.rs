@@ -125,7 +125,7 @@ impl<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType: Rng +
 }
 
 pub const WORDS_PER_STD_RNG: usize = 4;
-pub const SEEDS_PER_STD_BUFFER: usize = 128;
+pub const SEEDS_PER_STD_BUFFER: usize = 8;
 
 pub type SharedBufferRngStd = SharedBufferRng<WORDS_PER_STD_RNG, SEEDS_PER_STD_BUFFER, OsRng>;
 
