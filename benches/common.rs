@@ -4,10 +4,10 @@ use rand_core::block::BlockRngCore;
 use rand_core::OsRng;
 use shared_buffer_rng::{SharedBufferRng, WORDS_PER_STD_RNG};
 
-pub(crate) const RESEEDING_THRESHOLD: u64 = 1024;
+pub const RESEEDING_THRESHOLD: u64 = 1024;
 
 #[derive(Copy, Clone)]
-struct DefaultableUnalignedArray<const N: usize, T>([T; N]);
+pub struct DefaultableUnalignedArray<const N: usize, T>([T; N]);
 
 impl <const N: usize, T: Default + Copy> Default for DefaultableUnalignedArray<N, T> {
     fn default() -> Self {
@@ -39,7 +39,7 @@ impl<const N: usize, T> AsMut<[T]> for DefaultableUnalignedArray<N, T> {
     }
 }
 
-pub(crate) struct RngBufferCore<const N: usize, T: Rng>(T);
+pub struct RngBufferCore<const N: usize, T: Rng>(pub T);
 
 impl <const N: usize, T: Rng> BlockRngCore for RngBufferCore<N, T> where [(); WORDS_PER_STD_RNG * N]: {
     type Item = u64;
@@ -50,4 +50,4 @@ impl <const N: usize, T: Rng> BlockRngCore for RngBufferCore<N, T> where [(); WO
     }
 }
 
-pub(crate) type BenchmarkSharedBufferRng<const N: usize> = SharedBufferRng<WORDS_PER_STD_RNG, N, OsRng>;
+pub type BenchmarkSharedBufferRng<const N: usize> = SharedBufferRng<WORDS_PER_STD_RNG, N, OsRng>;
