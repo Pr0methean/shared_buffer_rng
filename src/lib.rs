@@ -95,8 +95,8 @@ impl <T, U: From<T>> Drop for RecyclableVec<T, U> {
 ///   [CryptoRng] if and only if the seed source does so.
 #[derive(Clone)]
 pub struct SharedBufferRng<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType: Rng + Clone> {
-    sender: Sender<DefaultableAlignedArray<WORDS_PER_SEED, u64>>,
     receiver: Receiver<DefaultableAlignedArray<WORDS_PER_SEED, u64>>,
+    sender: Sender<DefaultableAlignedArray<WORDS_PER_SEED, u64>>,
     // Used to determine whether to implement CryptoRng
     source: SourceType,
     thread_local_buffer: Arc<ThreadLocal<RecyclableVec<[u64; WORDS_PER_SEED], DefaultableAlignedArray<WORDS_PER_SEED, u64>>>>
