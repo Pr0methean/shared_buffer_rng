@@ -10,8 +10,8 @@ use rand_core::{OsRng, RngCore, SeedableRng};
 use std::sync::atomic::Ordering::SeqCst;
 use std::thread::spawn;
 use rand_core::block::BlockRng64;
-mod common;
-use common::{BenchmarkSharedBufferRng, RngBufferCore, RESEEDING_THRESHOLD};
+mod lib;
+use lib::{BenchmarkSharedBufferRng, RngBufferCore, RESEEDING_THRESHOLD};
 
 macro_rules! single_thread_bench_iai {
     ($n:expr) => {
@@ -112,12 +112,12 @@ contended_bench_iai!(32);
 contended_bench_iai!(64);
 contended_bench_iai!(128);
 
-iai::main!(single_thread_bench_0_shared_buffer, single_thread_bench_0_local_buffer,
-    single_thread_bench_1_shared_buffer, single_thread_bench_1_local_buffer,
+iai::main!(single_thread_bench_0_shared_buffer,
+    single_thread_bench_1_shared_buffer,
     single_thread_bench_2_shared_buffer, single_thread_bench_2_local_buffer,
     single_thread_bench_4_shared_buffer, single_thread_bench_4_local_buffer,
     single_thread_bench_8_shared_buffer, single_thread_bench_8_local_buffer,
-    contended_bench_0_shared_buffer, contended_bench_0_local_buffer,
+    contended_bench_0_shared_buffer,
     contended_bench_1_shared_buffer, contended_bench_1_local_buffer,
     contended_bench_2_shared_buffer, contended_bench_2_local_buffer,
     contended_bench_4_shared_buffer, contended_bench_4_local_buffer,
