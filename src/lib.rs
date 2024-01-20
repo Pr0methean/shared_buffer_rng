@@ -215,9 +215,7 @@ impl<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType: Rng +
             contents: Vec::<[u64; WORDS_PER_SEED]>::with_capacity(SEEDS_CAPACITY),
             recycler: self.sender.clone()
         });
-        if !local_buffer.contents.is_empty() {
-            *(results.as_mut()) = local_buffer.contents.pop().unwrap();
-        } else {
+        if local_buffer.contents.is_empty() {
             match self.receiver.try_recv() {
                 Ok(seed) => *results = seed,
                 Err(TryRecvError::Empty) => {
@@ -230,8 +228,9 @@ impl<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType: Rng +
                 },
                 Err(TryRecvError::Disconnected) => panic!("SharedBufferRng already closed"),
             }
+        } else {
+            *(results.as_mut()) = local_buffer.contents.pop().unwrap();
         }
-
     }
 }
 
