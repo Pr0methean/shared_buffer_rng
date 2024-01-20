@@ -1,3 +1,6 @@
+#![allow(incomplete_features)]
+#![feature(generic_const_exprs)]
+
 use bytemuck::cast_slice_mut;
 use rand::Rng;
 use rand_core::block::BlockRngCore;
