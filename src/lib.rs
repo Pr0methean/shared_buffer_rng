@@ -1,12 +1,14 @@
 #![allow(incomplete_features)]
 #![feature(generic_const_exprs)]
 #![feature(array_chunks)]
+#![feature(maybe_uninit_slice)]
+#![feature(maybe_uninit_as_bytes)]
 
 use aligned::{Aligned, A64};
 use bytemuck::{cast_slice_mut, Pod, Zeroable};
 use core::fmt::Debug;
-use core::mem::size_of;
-use crossbeam_channel::{bounded, Receiver, TryRecvError};
+use core::mem::{MaybeUninit, size_of};
+use crossbeam_channel::{bounded, never, Receiver, Sender, TryRecvError};
 use log::{error, info};
 use rand::rngs::adapter::ReseedingRng;
 use rand::rngs::OsRng;
@@ -14,8 +16,9 @@ use rand::Rng;
 use rand_chacha::ChaCha12Core;
 use rand_core::block::{BlockRng64, BlockRngCore};
 use rand_core::{CryptoRng, RngCore, SeedableRng};
-use std::sync::OnceLock;
-use std::thread::Builder;
+use std::sync::{Arc, OnceLock};
+use std::thread::{Builder};
+use thread_local_object::{Entry, ThreadLocal};
 use thread_priority::ThreadPriority;
 
 // Alignment is chosen to prevent "false sharing" (i.e. instance A and instance B being part of or straddling the same
@@ -29,6 +32,12 @@ pub struct DefaultableAlignedArray<const N: usize, T>(Aligned<A64, [T; N]>);
 impl<const N: usize, T: Default + Copy> Default for DefaultableAlignedArray<N, T> {
     fn default() -> Self {
         DefaultableAlignedArray(Aligned([T::default(); N]))
+    }
+}
+
+impl<const N: usize, T: Default + Copy> From<[T; N]> for DefaultableAlignedArray<N, T> {
+    fn from(value: [T; N]) -> Self {
+        Self(Aligned(value))
     }
 }
 
@@ -71,11 +80,30 @@ unsafe impl<const N: usize, T: Pod> Pod for DefaultableAlignedArray<N, T> {}
 /// * [SEEDS_CAPACITY] is the maximum number of `[u64; [WORDS_PER_SEED]]` instances to keep in memory for future use.
 /// * [SourceType] is the type of the seed source; currently it's only used to ensure the [SharedBufferRng] implements
 ///   [CryptoRng] if and only if the seed source does so.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SharedBufferRng<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType: Rng + Clone> {
+    sender: Sender<DefaultableAlignedArray<WORDS_PER_SEED, u64>>,
     receiver: Receiver<DefaultableAlignedArray<WORDS_PER_SEED, u64>>,
     // Used to determine whether to implement CryptoRng
     source: SourceType,
+    thread_local_buffer: Arc<ThreadLocal<Vec<[u64; WORDS_PER_SEED]>>>
+}
+
+impl <const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType: Rng + Clone> Drop
+for SharedBufferRng<WORDS_PER_SEED, SEEDS_CAPACITY, SourceType> {
+    fn drop(&mut self) {
+        // Drop own reference to the receiver, so the channel will close if no other refs exist
+        self.receiver = never();
+
+        // Recycle thread-local buffer into shared buffer, but only until it's full
+        match self.thread_local_buffer.remove() {
+            None => {}
+            Some(buffer) => {
+                let _ = buffer.into_iter().map_while(
+                    |seed| self.sender.try_send(seed.into()).ok()).last();
+            }
+        }
+    }
 }
 
 impl<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType: Rng + Clone>
@@ -142,6 +170,7 @@ impl<
     pub fn new(mut source: SourceType) -> Self {
         let (sender, receiver) = bounded(SEEDS_CAPACITY);
         info!("Creating a SharedBufferRngInner for {:?}", source);
+        let sender_copy = sender.clone();
         let source_copy = source.clone();
         Builder::new().name(format!("Load seed from {:?} into shared buffer", source)).spawn(move || {
             ThreadPriority::Min.set_for_current().unwrap_or_else(|e| error!("Error setting thread priority: {:?}", e));
@@ -171,8 +200,10 @@ impl<
             }
         }).unwrap();
         SharedBufferRng {
+            sender: sender_copy,
             receiver: receiver.into(),
             source: source_copy,
+            thread_local_buffer: ThreadLocal::new().into()
         }
     }
 }
@@ -184,11 +215,44 @@ impl<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType: Rng +
     type Results = DefaultableAlignedArray<WORDS_PER_SEED, u64>;
 
     fn generate(&mut self, results: &mut Self::Results) {
-        match self.receiver.try_recv() {
-            Ok(seed) => *results = seed,
-            Err(TryRecvError::Empty) => self.source.clone().fill_bytes(cast_slice_mut(results.as_mut())),
-            Err(TryRecvError::Disconnected) => panic!("SharedBufferRng already closed"),
-        }
+        self.thread_local_buffer.entry(|entry| match entry {
+            Entry::Occupied(local_buffer) => {
+                let local_buffer = local_buffer.into_mut();
+                if !local_buffer.is_empty() {
+                    *(results.as_mut()) = local_buffer.pop().unwrap();
+                } else {
+                    match self.receiver.try_recv() {
+                        Ok(seed) => *results = seed,
+                        Err(TryRecvError::Empty) => {
+                            unsafe {
+                                self.source.clone().fill_bytes(
+                                    MaybeUninit::slice_assume_init_mut(MaybeUninit::slice_as_bytes_mut(local_buffer.spare_capacity_mut())));
+                                local_buffer.set_len(SEEDS_CAPACITY);
+                            }
+                            *(results.as_mut()) = local_buffer.pop().unwrap();
+                        },
+                        Err(TryRecvError::Disconnected) => panic!("SharedBufferRng already closed"),
+                    }
+                }
+            }
+            Entry::Vacant(vacancy) => {
+                match self.receiver.try_recv() {
+                    Ok(seed) => *results = seed,
+                    Err(TryRecvError::Empty) => {
+                        let mut local_buffer = Vec::with_capacity(SEEDS_CAPACITY);
+                        unsafe {
+                            self.source.clone().fill_bytes(
+                                MaybeUninit::slice_assume_init_mut(MaybeUninit::slice_as_bytes_mut(local_buffer.spare_capacity_mut())));
+                            local_buffer.set_len(SEEDS_CAPACITY);
+                        }
+                        *(results.as_mut()) = local_buffer.pop().unwrap();
+                        vacancy.insert(local_buffer);
+                    },
+                    Err(TryRecvError::Disconnected) => panic!("SharedBufferRng already closed"),
+                }
+            }
+        })
+
     }
 }
 
