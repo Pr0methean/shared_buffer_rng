@@ -51,22 +51,17 @@ macro_rules! contended_bench_iai {
                     .collect();
                 let mut main_thread_rng = rngs.pop().unwrap();
                 drop(root);
-                let background_threads: Vec<_> = rngs.into_iter()
-                    .map(|mut rng| {
-                        let iterations_left = iterations_left.clone();
-                        spawn(move || {
-                            while iterations_left.fetch_sub(1, SeqCst) > 0 {
-                                black_box(rng.next_u64());
-                            }
-                        })
+               rngs.into_iter().for_each(|mut rng| {
+                    let iterations_left = iterations_left.clone();
+                    spawn(move || {
+                        while iterations_left.fetch_sub(1, SeqCst) > 0 {
+                            black_box(rng.next_u64());
+                        }
                     })
-                    .collect();
+                });
                 while iterations_left.fetch_sub(1, SeqCst) > 0 {
                     black_box(main_thread_rng.next_u64());
                 }
-                background_threads
-                    .into_iter()
-                    .for_each(|handle| handle.join().unwrap());
             }
 
             fn [< contended_bench_ $n _local_buffer >]() {
@@ -80,8 +75,7 @@ macro_rules! contended_bench_iai {
                     })
                     .collect();
                 let mut main_thread_rng = rngs.pop().unwrap();
-                let background_threads: Vec<_> = rngs.into_iter()
-                    .map(|mut rng| {
+                rngs.into_iter().for_each(|mut rng| {
                         let iterations_left = iterations_left.clone();
                         spawn(move || {
                             while iterations_left.fetch_sub(1, SeqCst) > 0 {
@@ -93,9 +87,6 @@ macro_rules! contended_bench_iai {
                 while iterations_left.fetch_sub(1, SeqCst) > 0 {
                     black_box(main_thread_rng.next_u64());
                 }
-                background_threads
-                    .into_iter()
-                    .for_each(|handle| handle.join().unwrap());
             }
         }
     };
