@@ -51,6 +51,7 @@ macro_rules! contended_bench_iai {
                 let rngs: Vec<_> = (0..$threads)
                     .map(|_| root.new_standard_rng(RESEEDING_THRESHOLD))
                     .collect();
+                let main_thread_rng = rngs.pop().unwrap();
                 drop(root);
                 let background_threads: Vec<_> = rngs.into_iter()
                     .map(|mut rng| {
@@ -61,6 +62,9 @@ macro_rules! contended_bench_iai {
                         })
                     })
                     .collect();
+                while ITERATIONS_LEFT.fetch_sub(1, SeqCst) > 0 {
+                    black_box(main_thread_rng.next_u64());
+                }
                 background_threads
                     .into_iter()
                     .for_each(|handle| handle.join().unwrap());
@@ -68,7 +72,7 @@ macro_rules! contended_bench_iai {
 
             fn [< contended_bench_ $n _local_buffer >]() {
                 ITERATIONS_LEFT.store(2 * RESEEDING_THRESHOLD * $n.max(1), SeqCst);
-                let rngs: Vec<_> = (0..$threads - 1)
+                let rngs: Vec<_> = (0..$threads)
                     .map(|_| {
                         let mut buffer = BlockRng64::new(RngBufferCore::<$n, OsRng>(OsRng::default()));
                         let mut seed = [0u8; 32];
@@ -76,6 +80,7 @@ macro_rules! contended_bench_iai {
                         ReseedingRng::new(ChaCha12Core::from_seed(seed), RESEEDING_THRESHOLD, buffer)
                     })
                     .collect();
+                let main_thread_rng = rngs.pop().unwrap();
                 let background_threads: Vec<_> = rngs.into_iter()
                     .map(|mut rng| {
                         spawn(move || {
@@ -85,6 +90,9 @@ macro_rules! contended_bench_iai {
                         })
                     })
                     .collect();
+                while ITERATIONS_LEFT.fetch_sub(1, SeqCst) > 0 {
+                    black_box(main_thread_rng.next_u64());
+                }
                 background_threads
                     .into_iter()
                     .for_each(|handle| handle.join().unwrap());
