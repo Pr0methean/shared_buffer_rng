@@ -44,8 +44,9 @@ macro_rules! contended_bench_iai {
     };
     ($n:expr, $threads:expr) => {
         paste! {
+            #[allow(unused)]
             fn [< contended_bench_ $n _shared_buffer >]() {
-                let iterations_left = Arc::new(AtomicU64::new(2 * RESEEDING_THRESHOLD * $n.max(1)));
+                let iterations_left = Arc::new(AtomicU64::new(2 * RESEEDING_THRESHOLD * $threads * $n.max(1)));
                 let root = BenchmarkSharedBufferRng::<$n>::new(OsRng::default());
                 let mut rngs: Vec<_> = (0..$threads)
                     .map(|_| root.new_standard_rng(RESEEDING_THRESHOLD))
@@ -66,7 +67,7 @@ macro_rules! contended_bench_iai {
             }
 
             fn [< contended_bench_ $n _local_buffer >]() {
-                let iterations_left = Arc::new(AtomicU64::new(2 * RESEEDING_THRESHOLD * $n.max(1)));
+                let iterations_left = Arc::new(AtomicU64::new(2 * RESEEDING_THRESHOLD * $threads * $n.max(1)));
                 let mut rngs: Vec<_> = (0..$threads)
                     .map(|_| {
                         let mut buffer = BlockRng64::new(RngBufferCore::<$n, OsRng>(OsRng::default()));
@@ -112,13 +113,14 @@ contended_bench_iai!(32);
 contended_bench_iai!(64);
 contended_bench_iai!(128);
 
-iai::main!(single_thread_bench_0_shared_buffer,
+iai::main!(
+    contended_bench_1_shared_buffer, contended_bench_1_local_buffer,
+    single_thread_bench_0_shared_buffer,
     single_thread_bench_1_shared_buffer,
     single_thread_bench_2_shared_buffer, single_thread_bench_2_local_buffer,
     single_thread_bench_4_shared_buffer, single_thread_bench_4_local_buffer,
     single_thread_bench_8_shared_buffer, single_thread_bench_8_local_buffer,
     contended_bench_0_shared_buffer,
-    contended_bench_1_shared_buffer, contended_bench_1_local_buffer,
     contended_bench_2_shared_buffer, contended_bench_2_local_buffer,
     contended_bench_4_shared_buffer, contended_bench_4_local_buffer,
     contended_bench_8_shared_buffer, contended_bench_8_local_buffer,
