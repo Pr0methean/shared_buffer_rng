@@ -52,7 +52,7 @@ macro_rules! contended_bench_iai {
                     .collect();
                 let mut main_thread_rng = rngs.pop().unwrap();
                 drop(root);
-               rngs.into_iter().for_each(|mut rng| {
+                rngs.into_iter().for_each(|mut rng| {
                     let iterations_left = iterations_left.clone();
                     spawn(move || {
                         while iterations_left.fetch_sub(1, SeqCst) > 0 {
@@ -83,8 +83,7 @@ macro_rules! contended_bench_iai {
                                 black_box(rng.next_u64());
                             }
                         })
-                    })
-                    .collect();
+                    });
                 while iterations_left.fetch_sub(1, SeqCst) > 0 {
                     black_box(main_thread_rng.next_u64());
                 }
