@@ -209,6 +209,14 @@ impl<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType: Rng +
     type Results = DefaultableAlignedArray<WORDS_PER_SEED, u64>;
 
     fn generate(&mut self, results: &mut Self::Results) {
+        if SEEDS_CAPACITY <= 1 {
+            match self.receiver.try_recv() {
+                Ok(seed) => *results = seed,
+                Err(TryRecvError::Empty) => self.source.clone().fill_bytes(cast_slice_mut(results.as_mut())),
+                Err(TryRecvError::Disconnected) => panic!("SharedBufferRng already closed"),
+            }
+            return;
+        }
         let mut local_buffer = self.thread_local_buffer.get(|_| RecyclableVec {
             contents: Vec::<[u64; WORDS_PER_SEED]>::with_capacity(SEEDS_CAPACITY),
             recycler: self.sender.clone()
