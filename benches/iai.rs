@@ -37,6 +37,8 @@ macro_rules! single_thread_bench_iai {
     }
 }
 
+static ITERATIONS_LEFT: AtomicU64 = AtomicU64::new(0);
+
 macro_rules! contended_bench_iai {
     ($n:expr) => {
         contended_bench_iai!($n, num_cpus::get_physical());
@@ -44,7 +46,7 @@ macro_rules! contended_bench_iai {
     ($n:expr, $threads:expr) => {
         paste! {
             fn [< contended_bench_ $n _shared_buffer >]() {
-                let iterations_left = Arc::new(AtomicU64::new(2 * RESEEDING_THRESHOLD * $n.max(1)));
+                ITERATIONS_LEFT.store(2 * RESEEDING_THRESHOLD * $n.max(1), SeqCst);
                 let root = BenchmarkSharedBufferRng::<$n>::new(OsRng::default());
                 let mut rngs: Vec<_> = (0..$threads)
                     .map(|_| root.new_standard_rng(RESEEDING_THRESHOLD))
@@ -53,21 +55,23 @@ macro_rules! contended_bench_iai {
                 drop(root);
                 let background_threads: Vec<_> = rngs.into_iter()
                     .map(|mut rng| {
-                        let iterations_left = iterations_left.clone();
                         spawn(move || {
-                            while iterations_left.fetch_sub(1, SeqCst) > 0 {
+                            while ITERATIONS_LEFT.fetch_sub(1, SeqCst) > 0 {
                                 black_box(rng.next_u64());
                             }
                         })
                     })
                     .collect();
-                while iterations_left.fetch_sub(1, SeqCst) > 0 {
+                while ITERATIONS_LEFT.fetch_sub(1, SeqCst) > 0 {
                     black_box(main_thread_rng.next_u64());
                 }
+                background_threads
+                    .into_iter()
+                    .for_each(|handle| handle.join().unwrap());
             }
 
             fn [< contended_bench_ $n _local_buffer >]() {
-                let iterations_left = Arc::new(AtomicU64::new(2 * RESEEDING_THRESHOLD * $n.max(1)));
+                ITERATIONS_LEFT.store(2 * RESEEDING_THRESHOLD * $n.max(1), SeqCst);
                 let mut rngs: Vec<_> = (0..$threads)
                     .map(|_| {
                         let mut buffer = BlockRng64::new(RngBufferCore::<$n, OsRng>(OsRng::default()));
@@ -79,7 +83,6 @@ macro_rules! contended_bench_iai {
                 let mut main_thread_rng = rngs.pop().unwrap();
                 let background_threads: Vec<_> = rngs.into_iter()
                     .map(|mut rng| {
-                        let iterations_left = iterations_left.clone();
                         spawn(move || {
                             while ITERATIONS_LEFT.fetch_sub(1, SeqCst) > 0 {
                                 black_box(rng.next_u64());
@@ -87,9 +90,12 @@ macro_rules! contended_bench_iai {
                         })
                     })
                     .collect();
-                while iterations_left.fetch_sub(1, SeqCst) > 0 {
+                while ITERATIONS_LEFT.fetch_sub(1, SeqCst) > 0 {
                     black_box(main_thread_rng.next_u64());
                 }
+                background_threads
+                    .into_iter()
+                    .for_each(|handle| handle.join().unwrap());
             }
         }
     };
