@@ -40,7 +40,7 @@ macro_rules! single_thread_bench_iai {
 
 macro_rules! contended_bench_iai {
     ($n:expr) => {
-        contended_bench_iai!($n, num_cpus::get_physical());
+        contended_bench_iai!($n, num_cpus::get_physical() as u64);
     };
     ($n:expr, $threads:expr) => {
         paste! {
