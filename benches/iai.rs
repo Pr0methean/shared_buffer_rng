@@ -51,6 +51,7 @@ macro_rules! contended_bench_iai {
                 let rngs: Vec<_> = (0..$threads)
                     .map(|_| root.new_standard_rng(RESEEDING_THRESHOLD))
                     .collect();
+                drop(root);
                 let background_threads: Vec<_> = rngs.into_iter()
                     .map(|mut rng| {
                         spawn(move || {

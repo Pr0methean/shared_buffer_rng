@@ -69,6 +69,7 @@ macro_rules! benchmark_contended {
         let rngs: Vec<_> = (0..($threads - 1))
             .map(|_| root.new_standard_rng(RESEEDING_THRESHOLD))
             .collect();
+        drop(root);
         let background_threads: Vec<_> = rngs.into_iter()
             .map(|mut rng| {
                 spawn(move || {
@@ -79,7 +80,6 @@ macro_rules! benchmark_contended {
             })
             .collect();
         let mut reseeding_from_shared = root.new_standard_rng(RESEEDING_THRESHOLD);
-        drop(root);
         $group.bench_with_input(BenchmarkId::new(format!("SharedBufferRng, {:02} threads", $threads), $n),
             &$n, |b, _| b.iter(|| black_box(reseeding_from_shared.next_u64())));
         FINISHED.store(true, SeqCst);
