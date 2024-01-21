@@ -7,6 +7,7 @@ use paste::paste;
 use rand::rngs::adapter::ReseedingRng;
 use rand_chacha::{ChaCha12Core};
 use rand_core::{OsRng, RngCore, SeedableRng};
+use std::sync::Arc;
 use std::sync::atomic::Ordering::SeqCst;
 use std::thread::spawn;
 use rand_core::block::BlockRng64;
