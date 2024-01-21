@@ -111,7 +111,7 @@ impl<const WORDS_PER_SEED: usize, const SEEDS_CAPACITY: usize, SourceType: Rng +
         &self,
         reseeding_threshold: u64,
     ) -> ReseedingRng<ChaCha12Core, BlockRng64<SharedBufferRngStd>> {
-        let mut reseeder = seeder_from_default_buffer();
+        let mut reseeder = self.new_seeder();
         let mut seed = <ChaCha12Core as SeedableRng>::Seed::default();
         reseeder.fill_bytes(&mut seed);
         ReseedingRng::new(ChaCha12Core::from_seed(seed), reseeding_threshold, reseeder)
