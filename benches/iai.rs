@@ -58,7 +58,7 @@ macro_rules! contended_bench_iai {
                         while iterations_left.fetch_sub(1, SeqCst) > 0 {
                             black_box(rng.next_u64());
                         }
-                    })
+                    });
                 });
                 while iterations_left.fetch_sub(1, SeqCst) > 0 {
                     black_box(main_thread_rng.next_u64());
